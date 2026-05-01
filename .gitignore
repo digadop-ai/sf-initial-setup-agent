@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# macOS
+.DS_Store
+
+# Editor
+.vscode/
+.idea/
+
+# Backups and local notes
+*.bak
+
+# Personal debugging notes — kept locally, not for public distribution.
+# (Contains specific usernames, client engagements, and home paths.)
+salesforce-mcp-setup.md
+
+# Local config (lives in ~/.sf-initial-setup-agent-config.json by default,
+# but ignore if accidentally placed in the repo dir).
+.sf-initial-setup-agent-config.json
+
+# Personal Claude Code context — gitignored so personal/strategic notes
+# stay local while still being read by Claude Code on session startup.
+CLAUDE.md
+
+# Claude Code per-folder local settings (tool permission allowlist, etc).
+.claude/settings.local.json
