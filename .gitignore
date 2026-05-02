@@ -29,3 +29,7 @@ CLAUDE.md
 
 # Claude Code per-folder local settings (tool permission allowlist, etc).
 .claude/settings.local.json
+
+# macOS double-click shortcuts — personal developer convenience, not a
+# user-facing artifact of the agent.
+*.command
