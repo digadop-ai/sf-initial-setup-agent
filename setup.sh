@@ -13,14 +13,7 @@ command -v sf >/dev/null || {
   npm install -g @salesforce/cli
 }
 
-if [ -z "$FIVEGL_ANTHROPIC_API_KEY" ] && [ -z "$ANTHROPIC_API_KEY" ]; then
-  echo "⚠️  No Anthropic API key set."
-  echo "   Add to ~/.5gl-agents-env:"
-  echo '     export FIVEGL_ANTHROPIC_API_KEY=sk-ant-...'
-  echo "   Then ensure ~/.zshrc sources it:"
-  echo '     echo "source ~/.5gl-agents-env" >> ~/.zshrc'
-  echo "   Then: source ~/.zshrc"
-  exit 1
-fi
+# The agent prompts for an Anthropic API key on first run if one isn't found
+# in the environment or ~/.5gl-agents-env, so no key check is needed here.
 
 echo "✅ Ready. Run ./run.sh"

@@ -1,16 +1,14 @@
-import os, subprocess, json, time
+import os, subprocess, json, time, re, getpass
 from pathlib import Path
 from anthropic import Anthropic, APIStatusError, APIConnectionError, RateLimitError
 
-# Prefer the namespaced 5GL key so users with an existing ANTHROPIC_API_KEY
-# (Cursor, Claude Code, other tools) can keep their existing setup intact.
-# Fall back to ANTHROPIC_API_KEY for local dev convenience.
-_api_key = os.environ.get("FIVEGL_ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_API_KEY")
+# Shared env file for all 5GL agents. The agent reads it directly so it works
+# even if the current shell hasn't sourced it (or if ~/.zshrc never did).
+ENV_FILE = Path.home() / ".5gl-agents-env"
 
-# max_retries=5 lets the SDK ride out brief 5xx/429 blips on its own. The
-# _call_api_with_retry() wrapper below adds a second, more patient net for
-# longer outages so a multi-minute hiccup doesn't drop the whole session.
-client = Anthropic(api_key=_api_key, max_retries=5)
+# Set in __main__ once the key has been resolved.
+client = None
+
 CONFIG_PATH = Path.home() / ".sf-initial-setup-agent-config.json"
 
 # Set by run_agent() before the loop starts; used to confine the file tools.
@@ -28,6 +26,79 @@ DENY_SUBSTRINGS = (
 # Context-window soft limit. Sonnet 4 is 200K; we bail at 180K so the next
 # turn's tool results don't push us over.
 CONTEXT_TOKEN_SOFT_LIMIT = 180_000
+
+# ---------- api key ----------
+# Matches shell-style assignment: optional `export`, NAME=value, with optional
+# surrounding single or double quotes. Captures (name, value).
+_ENV_LINE = re.compile(r'^\s*(?:export\s+)?(\w+)\s*=\s*(.*?)\s*$')
+
+def _read_env_file_var(var_name):
+    """Return the value of var_name in ENV_FILE, or None. Handles quoted values."""
+    if not ENV_FILE.exists():
+        return None
+    try:
+        for raw in ENV_FILE.read_text().splitlines():
+            line = raw.split("#", 1)[0]
+            m = _ENV_LINE.match(line)
+            if not m or m.group(1) != var_name:
+                continue
+            val = m.group(2)
+            if len(val) >= 2 and val[0] == val[-1] and val[0] == '"':
+                # Inverse of _write_env_file_var's escaping inside double quotes.
+                val = val[1:-1]
+                val = re.sub(r'\\([\\"`$])', r'\1', val)
+            elif len(val) >= 2 and val[0] == val[-1] and val[0] == "'":
+                # Single-quoted shell strings have no escapes.
+                val = val[1:-1]
+            return val
+    except Exception:
+        return None
+    return None
+
+def _write_env_file_var(var_name, value):
+    """Add or update var_name=value in ENV_FILE, preserving other lines. Sets 600 perms."""
+    lines = []
+    if ENV_FILE.exists():
+        for raw in ENV_FILE.read_text().splitlines():
+            stripped = raw.split("#", 1)[0]
+            m = _ENV_LINE.match(stripped)
+            if m and m.group(1) == var_name:
+                continue
+            lines.append(raw)
+    # Escape characters that have meaning inside double-quoted shell strings so
+    # the file remains safe to `source` from ~/.zshrc.
+    safe = value.replace("\\", "\\\\").replace('"', '\\"').replace("$", "\\$").replace("`", "\\`")
+    lines.append(f'export {var_name}="{safe}"')
+    ENV_FILE.write_text("\n".join(lines) + "\n")
+    ENV_FILE.chmod(0o600)
+
+def resolve_api_key():
+    """Return an Anthropic API key, prompting the user if necessary.
+
+    Resolution order:
+      1. FIVEGL_ANTHROPIC_API_KEY / ANTHROPIC_API_KEY env vars (set by the shell).
+      2. Same vars parsed directly out of ~/.5gl-agents-env (defensive — the file
+         might exist but the current shell never sourced it).
+      3. Interactive prompt; persisted to ~/.5gl-agents-env as the shared default
+         for all 5GL agents.
+    """
+    key = os.environ.get("FIVEGL_ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_API_KEY")
+    if key:
+        return key
+    key = _read_env_file_var("FIVEGL_ANTHROPIC_API_KEY") or _read_env_file_var("ANTHROPIC_API_KEY")
+    if key:
+        return key
+    print("\nAnthropic API key not found.")
+    print(f"It will be saved to {ENV_FILE} as the shared key for all 5GL agents.")
+    print("(Get one at https://console.anthropic.com/settings/keys)\n")
+    while True:
+        key = getpass.getpass("Anthropic API key (input hidden): ").strip()
+        if key:
+            break
+        print("  (required)")
+    _write_env_file_var("FIVEGL_ANTHROPIC_API_KEY", key)
+    print(f"→ Saved to {ENV_FILE}\n")
+    return key
 
 # ---------- config ----------
 def load_config():
@@ -293,5 +364,10 @@ def run_agent(params):
         history.append({"role": "user", "content": msg})
 
 if __name__ == "__main__":
+    api_key = resolve_api_key()
+    # max_retries=5 lets the SDK ride out brief 5xx/429 blips on its own. The
+    # _call_api_with_retry() wrapper below adds a second, more patient net for
+    # longer outages so a multi-minute hiccup doesn't drop the whole session.
+    client = Anthropic(api_key=api_key, max_retries=5)
     params = startup_wizard()
     run_agent(params)
