@@ -77,6 +77,28 @@ PROFILE_SHAPE_DRIVERS = [
     "RecordType",
 ]
 
+# Experience Cloud (formerly Communities). Pages, themes, branding sets, and
+# component configs live as JSON files inside `ExperienceBundle` — NOT in
+# `FlexiPage`. FlexiPage is for Lightning App Builder pages only (record pages,
+# app pages, home pages); confusing the two is a common gotcha. The generic
+# enumeration path below picks up every type returned by `sf org list metadata-types`,
+# so all of these flow through correctly without special-casing — listed here so
+# the design rationale is explicit and a sanity-check warning fires if the org
+# has `Network` (= Experience Cloud is enabled) but no `ExperienceBundle` (= might
+# indicate an old API version or a Site.com-only legacy site).
+EXPERIENCE_CLOUD_TYPES = (
+    "Network",                         # site definition: members, navigation, settings
+    "ExperienceBundle",                # the bundle: pages (JSON), themes, branding, components
+    "CustomSite",                      # site URL configuration
+    "SiteDotCom",                      # legacy Site.com sites (pre-LWR/Aura templates)
+    "NavigationMenu",                  # community navigation menus
+    "ManagedTopics",                   # community topics
+    "Branding",                        # branding sets
+    "CommunityTemplateDefinition",     # legacy community templates
+    "CommunityThemeDefinition",        # legacy community themes
+)
+
+
 # StandardValueSet doesn't appear in `sf org list metadata`. Hardcoded canonical list.
 # Source: Salesforce metadata API docs, "Standard Value Set Names".
 STANDARD_VALUE_SETS = [
@@ -254,6 +276,18 @@ def enumerate_org(alias: str, include_managed: bool) -> OrgEnumeration:
 
     org.installed_packages = enumerate_packages(alias)
     org.package_licenses = enumerate_package_licenses(alias)
+
+    # Experience Cloud sanity check: if Network is present (= EC is enabled in
+    # the org) but ExperienceBundle isn't, the modern bundle metadata won't be
+    # captured. Could mean the org pre-dates ExperienceBundle (API <47.0) or
+    # uses Site.com-only legacy sites. Warn so the operator notices.
+    if "Network" in org.members_by_type and "ExperienceBundle" not in org.members_by_type:
+        emit("warn_experience_cloud",
+             message=("Network present but ExperienceBundle missing; "
+                      "Experience Cloud page content may not be captured. "
+                      "Check API version and whether sites are LWR/Aura (ExperienceBundle) "
+                      "or legacy Site.com (SiteDotCom)."),
+             ec_types_found=sorted(t for t in EXPERIENCE_CLOUD_TYPES if t in org.members_by_type))
 
     total_members = sum(len(v) for v in org.members_by_type.values())
     emit("enumerate_done",
