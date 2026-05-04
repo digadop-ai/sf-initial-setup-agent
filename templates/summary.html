@@ -1,0 +1,58 @@
+{% extends "base.html" %}
+{% block title %}Summary · sf-initial-setup-agent{% endblock %}
+{% block content %}
+<section>
+    <h2>Retrieve summary</h2>
+
+    {% if not session %}
+        <p class="hint">No retrieve has been run yet.</p>
+    {% else %}
+        <div class="config-summary">
+            <div><strong>Alias:</strong> {{ session.config.alias }}</div>
+            <div><strong>Started:</strong> {{ session.started_at.isoformat(timespec='seconds') }}</div>
+            <div><strong>State:</strong> <span class="pill state-{{ session.state }}">{{ session.state }}</span></div>
+            <div><strong>Process exit:</strong> {{ session.returncode if session.returncode is not none else '—' }}</div>
+        </div>
+
+        {% if summary %}
+            <h3>Totals</h3>
+            <ul>
+                <li>Chunks succeeded: {{ summary.totals.succeeded }}</li>
+                <li>Chunks failed: {{ summary.totals.failed }}</li>
+                <li>Files retrieved: {{ summary.totals.files_retrieved }}</li>
+            </ul>
+
+            <h3>Chunks</h3>
+            <table class="chunks">
+                <thead>
+                    <tr>
+                        <th>Chunk</th>
+                        <th>Outcome</th>
+                        <th>Files</th>
+                        <th>Elapsed (s)</th>
+                        <th>Retried?</th>
+                        <th>Log / error</th>
+                    </tr>
+                </thead>
+                <tbody>
+                {% for c in summary.chunks %}
+                    <tr class="chunk-row state-{{ 'done' if c.success else 'failed' }}">
+                        <td><code>{{ c.chunk_id }}</code></td>
+                        <td>{{ 'succeeded' if c.success else 'failed' }}</td>
+                        <td>{{ c.files_retrieved }}</td>
+                        <td>{{ c.elapsed_s }}</td>
+                        <td>{{ 'yes' if c.retried else '' }}</td>
+                        <td>
+                            {% if c.error %}<span class="err">{{ c.error }}</span><br>{% endif %}
+                            {% if c.log_path %}<small><code>{{ c.log_path }}</code></small>{% endif %}
+                        </td>
+                    </tr>
+                {% endfor %}
+                </tbody>
+            </table>
+        {% else %}
+            <p class="hint">No <code>retrieve-summary.json</code> on disk yet — retrieve may still be running, or it failed before producing a summary.</p>
+        {% endif %}
+    {% endif %}
+</section>
+{% endblock %}

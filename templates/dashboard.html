@@ -1,0 +1,52 @@
+{% extends "base.html" %}
+{% block title %}Dashboard · sf-initial-setup-agent{% endblock %}
+{% block content %}
+<section>
+    <h2>Retrieve dashboard</h2>
+
+    <div class="config-summary">
+        <div><strong>Alias:</strong> {{ config.alias or '—' }}</div>
+        <div><strong>Project dir:</strong> <code>{{ project_dir or '—' }}</code></div>
+        <div><strong>Concurrency:</strong> {{ config.concurrency }} · <strong>Chunk size:</strong> {{ config.chunk_size }} · <strong>Wait/chunk:</strong> {{ config.wait_minutes }}m</div>
+        <div><strong>Managed:</strong> {{ 'included' if config.include_managed else 'excluded' }}{% if config.exclude_expired_packages %} · expired packages dropped{% endif %}{% if config.exclude_namespaces %} · namespace excludes: <code>{{ config.exclude_namespaces }}</code>{% endif %}</div>
+    </div>
+
+    <div class="actions">
+        <button id="start-btn" class="primary"
+                {% if session and session.state == 'running' %}disabled{% endif %}>
+            Start retrieve
+        </button>
+        <button id="cancel-btn" class="danger"
+                {% if not session or session.state != 'running' %}disabled{% endif %}>
+            Cancel
+        </button>
+        <span id="state-pill" class="pill state-{{ session.state if session else 'idle' }}">
+            {{ session.state if session else 'idle' }}
+        </span>
+    </div>
+
+    <h3>Chunks</h3>
+    <table id="chunk-table" class="chunks">
+        <thead>
+            <tr>
+                <th>Chunk</th>
+                <th>State</th>
+                <th>Members</th>
+                <th>Files</th>
+                <th>Elapsed</th>
+                <th>Notes</th>
+            </tr>
+        </thead>
+        <tbody></tbody>
+    </table>
+    <p id="chunk-empty" class="hint">No chunks yet. Click <em>Start retrieve</em> to begin.</p>
+
+    <h3>Event log</h3>
+    <pre id="event-log" class="event-log"></pre>
+</section>
+{% endblock %}
+{% block scripts %}
+<script>
+window.SF_DASHBOARD = true;
+</script>
+{% endblock %}

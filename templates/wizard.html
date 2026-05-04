@@ -1,0 +1,90 @@
+{% extends "base.html" %}
+{% block title %}Wizard · sf-initial-setup-agent{% endblock %}
+{% block content %}
+<section>
+    <h2>Configure retrieve</h2>
+    <p class="hint">Settings persist to <code>~/.sf-initial-setup-agent-config.json</code>.</p>
+
+    <form method="post" action="/wizard" class="stack">
+        <label>
+            <span>Org alias <em>(must already be authed via <code>sf org login</code>)</em></span>
+            <input type="text" name="alias" required value="{{ config.alias or '' }}" placeholder="ecuat">
+        </label>
+
+        <label>
+            <span>Project parent directory</span>
+            <div class="row">
+                <input type="text" name="project_parent_dir" id="project_parent_dir" required
+                       value="{{ config.project_parent_dir or '' }}"
+                       placeholder="/Users/you/projects">
+                <button type="button" id="pick-folder">Pick…</button>
+            </div>
+            <small class="hint">SFDX project will live at <code>&lt;parent&gt;/&lt;alias&gt;-metadata/</code>.</small>
+        </label>
+
+        <fieldset>
+            <legend>Managed packages</legend>
+            <label class="inline">
+                <input type="checkbox" name="include_managed"
+                       {% if config.include_managed %}checked{% endif %}>
+                Include managed-package metadata
+                <small class="hint">Typically 5–10× larger; faithful snapshot.</small>
+            </label>
+            <label class="inline">
+                <input type="checkbox" name="exclude_expired_packages"
+                       {% if config.exclude_expired_packages %}checked{% endif %}>
+                Drop members from packages with Expired/Suspended licenses
+            </label>
+            <label>
+                <span>Exclude namespaces (comma-separated)</span>
+                <input type="text" name="exclude_namespaces"
+                       value="{{ config.exclude_namespaces or '' }}"
+                       placeholder="DeadCo,ZombieCo">
+            </label>
+        </fieldset>
+
+        <fieldset>
+            <legend>Performance</legend>
+            <label class="inline">
+                <span>Concurrency</span>
+                <input type="number" name="concurrency" min="1" max="25"
+                       value="{{ config.concurrency or 6 }}">
+                <small class="hint">Workers in parallel (Salesforce soft limit ~25; 6 is comfortable).</small>
+            </label>
+            <label class="inline">
+                <span>Chunk size</span>
+                <input type="number" name="chunk_size" min="100" max="5000"
+                       value="{{ config.chunk_size or 1500 }}">
+                <small class="hint">Members per chunked manifest.</small>
+            </label>
+            <label class="inline">
+                <span>Wait minutes per chunk</span>
+                <input type="number" name="wait_minutes" min="5" max="600"
+                       value="{{ config.wait_minutes or 60 }}">
+            </label>
+        </fieldset>
+
+        <div class="actions">
+            <button type="submit" class="primary">Save & continue →</button>
+        </div>
+    </form>
+</section>
+{% endblock %}
+{% block scripts %}
+<script>
+document.getElementById('pick-folder').addEventListener('click', async () => {
+    try {
+        const res = await fetch('/pick-project-dir', { method: 'POST' });
+        if (!res.ok) {
+            const err = await res.json().catch(() => ({}));
+            alert('Folder picker: ' + (err.detail || res.status));
+            return;
+        }
+        const data = await res.json();
+        document.getElementById('project_parent_dir').value = data.path;
+    } catch (e) {
+        alert('Folder picker failed: ' + e);
+    }
+});
+</script>
+{% endblock %}

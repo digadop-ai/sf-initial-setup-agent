@@ -33,3 +33,8 @@ CLAUDE.md
 # macOS double-click shortcuts — personal developer convenience, not a
 # user-facing artifact of the agent.
 *.command
+
+# Internal handoff / design docs for in-flight refactors. Local-only;
+# the rationale they capture should land in commit messages and the
+# decisions log, not in the public repo.
+HANDOFF-*.md

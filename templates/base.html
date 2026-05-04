@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{% block title %}sf-initial-setup-agent{% endblock %}</title>
+    <link rel="stylesheet" href="{{ url_for('static', path='/app.css') }}">
+</head>
+<body>
+    <header class="app-header">
+        <div class="container">
+            <h1><a href="/">sf-initial-setup-agent</a></h1>
+            <nav>
+                <a href="/">Wizard</a>
+                <a href="/dashboard">Dashboard</a>
+                <a href="/summary">Summary</a>
+            </nav>
+        </div>
+    </header>
+    <main class="container">
+        {% block content %}{% endblock %}
+    </main>
+    <footer class="app-footer">
+        <div class="container">
+            <small>Built by <a href="https://5gl.ai">5GL.ai</a> · local · loopback only</small>
+        </div>
+    </footer>
+    <script src="{{ url_for('static', path='/app.js') }}"></script>
+    {% block scripts %}{% endblock %}
+</body>
+</html>
