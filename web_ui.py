@@ -302,6 +302,93 @@ async def wizard_submit(
     return RedirectResponse("/dashboard", status_code=303)
 
 
+@app.get("/list-orgs")
+async def list_orgs():
+    """Run `sf org list --json` and return a flat list of authed orgs."""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "sf", "org", "list", "--json",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=20)
+    except (asyncio.TimeoutError, FileNotFoundError) as e:
+        return JSONResponse({"orgs": [], "error": f"sf org list failed: {e}"})
+
+    try:
+        data = json.loads(stdout.decode(errors="replace"))
+    except json.JSONDecodeError:
+        return JSONResponse({"orgs": [], "error": "could not parse `sf org list` output"})
+
+    result = data.get("result", {}) if isinstance(data.get("result"), dict) else {}
+    orgs: list[dict] = []
+    seen_aliases: set[str] = set()
+    for category in ("nonScratchOrgs", "sandboxes", "scratchOrgs", "devHubs", "other"):
+        for o in result.get(category, []) or []:
+            alias = (o.get("alias") or "").strip()
+            if not alias or alias in seen_aliases:
+                continue
+            seen_aliases.add(alias)
+            instance_url = o.get("instanceUrl") or ""
+            is_sandbox = (
+                category == "sandboxes"
+                or "sandbox" in instance_url.lower()
+                or "test.salesforce.com" in instance_url.lower()
+            )
+            orgs.append({
+                "alias": alias,
+                "username": o.get("username") or "",
+                "instance_url": instance_url,
+                "is_sandbox": is_sandbox,
+                "is_default": bool(o.get("isDefaultUsername") or o.get("isDefault")),
+            })
+    orgs.sort(key=lambda o: o["alias"].lower())
+    return JSONResponse({"orgs": orgs})
+
+
+@app.post("/auth-org")
+async def auth_org(
+    alias: str = Form(...),
+    sandbox: str = Form(""),
+    instance_url: str = Form(""),
+):
+    """Run `sf org login web` as a subprocess. Blocks until the user completes OAuth in their browser."""
+    alias = alias.strip()
+    if not alias:
+        raise HTTPException(status_code=400, detail="alias is required")
+
+    cmd = ["sf", "org", "login", "web", "--alias", alias]
+    instance_url = instance_url.strip()
+    if instance_url:
+        cmd += ["--instance-url", instance_url]
+    elif sandbox == "on":
+        cmd += ["--instance-url", "https://test.salesforce.com"]
+
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=600)
+    except asyncio.TimeoutError:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+        raise HTTPException(status_code=408,
+                            detail="OAuth flow timed out (10 min). Cancel any open Salesforce login tab and try again.")
+    except FileNotFoundError:
+        raise HTTPException(status_code=500, detail="`sf` CLI not found on PATH.")
+
+    if proc.returncode != 0:
+        err = (stderr.decode(errors="replace") or stdout.decode(errors="replace")).strip()
+        raise HTTPException(status_code=400,
+                            detail=f"sf org login web failed: {err[-500:] or 'unknown error'}")
+
+    return JSONResponse({"alias": alias, "success": True})
+
+
 @app.post("/pick-project-dir")
 async def pick_project_dir():
     """Trigger native folder picker. macOS only for now (per master memory: macOS-only agent)."""

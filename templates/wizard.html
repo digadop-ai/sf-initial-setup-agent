@@ -6,10 +6,40 @@
     <p class="hint">Settings persist to <code>~/.sf-initial-setup-agent-config.json</code>.</p>
 
     <form method="post" action="/wizard" class="stack">
-        <label>
-            <span>Org alias <em>(must already be authed via <code>sf org login</code>)</em></span>
-            <input type="text" name="alias" required value="{{ config.alias or '' }}" placeholder="ecuat">
-        </label>
+
+        <fieldset>
+            <legend>Salesforce org</legend>
+            <label>
+                <span>Choose authenticated org</span>
+                <select name="alias" id="alias-select" required>
+                    <option value="">— loading orgs… —</option>
+                </select>
+                <small class="hint">If your org isn't here, authenticate it below first.</small>
+            </label>
+
+            <details id="auth-details">
+                <summary>Authenticate a new org</summary>
+                <div class="stack-tight">
+                    <label>
+                        <span>New alias <em>(short label you'll use in this UI)</em></span>
+                        <input type="text" id="auth-alias" placeholder="ecuat">
+                    </label>
+                    <label class="inline">
+                        <input type="checkbox" id="auth-sandbox">
+                        Sandbox <small class="hint">(uses <code>https://test.salesforce.com</code>; uncheck for production)</small>
+                    </label>
+                    <label>
+                        <span>Custom instance URL <em>(optional; overrides the sandbox toggle)</em></span>
+                        <input type="text" id="auth-instance-url"
+                               placeholder="https://yourco--sandbox.sandbox.my.salesforce.com">
+                    </label>
+                    <div class="actions">
+                        <button type="button" id="auth-btn">Authenticate (opens Salesforce login in browser)</button>
+                    </div>
+                    <p id="auth-status" class="hint"></p>
+                </div>
+            </details>
+        </fieldset>
 
         <label>
             <span>Project parent directory</span>
@@ -72,6 +102,72 @@
 {% endblock %}
 {% block scripts %}
 <script>
+const PERSISTED_ALIAS = {{ (config.alias or '') | tojson }};
+
+async function loadOrgs() {
+    const select = document.getElementById('alias-select');
+    select.innerHTML = '<option value="">— loading orgs… —</option>';
+    try {
+        const res = await fetch('/list-orgs');
+        const data = await res.json();
+        if (!data.orgs || data.orgs.length === 0) {
+            select.innerHTML = '<option value="">— no orgs authed yet — authenticate one below —</option>';
+            document.getElementById('auth-details').open = true;
+            return;
+        }
+        const options = ['<option value="">— pick one —</option>'];
+        for (const o of data.orgs) {
+            const label = `${o.alias} · ${o.username}${o.is_sandbox ? ' (sandbox)' : ''}`;
+            options.push(`<option value="${o.alias}">${label}</option>`);
+        }
+        select.innerHTML = options.join('');
+        if (PERSISTED_ALIAS && data.orgs.some(o => o.alias === PERSISTED_ALIAS)) {
+            select.value = PERSISTED_ALIAS;
+        }
+    } catch (e) {
+        select.innerHTML = `<option value="">— failed to load orgs: ${e} —</option>`;
+    }
+}
+
+document.getElementById('auth-btn').addEventListener('click', async () => {
+    const alias = document.getElementById('auth-alias').value.trim();
+    const sandbox = document.getElementById('auth-sandbox').checked;
+    const instanceUrl = document.getElementById('auth-instance-url').value.trim();
+    const status = document.getElementById('auth-status');
+    const btn = document.getElementById('auth-btn');
+
+    if (!alias) {
+        status.textContent = 'Alias is required.';
+        return;
+    }
+
+    btn.disabled = true;
+    status.textContent = 'Opening Salesforce login in your browser… complete the login, then return here.';
+
+    const formData = new FormData();
+    formData.append('alias', alias);
+    if (sandbox) formData.append('sandbox', 'on');
+    if (instanceUrl) formData.append('instance_url', instanceUrl);
+
+    try {
+        const res = await fetch('/auth-org', { method: 'POST', body: formData });
+        if (!res.ok) {
+            const err = await res.json().catch(() => ({}));
+            status.textContent = 'Auth failed: ' + (err.detail || res.status);
+            btn.disabled = false;
+            return;
+        }
+        status.textContent = `✓ Authenticated as ${alias}`;
+        await loadOrgs();
+        document.getElementById('alias-select').value = alias;
+        document.getElementById('auth-details').open = false;
+    } catch (e) {
+        status.textContent = 'Auth failed: ' + e;
+    } finally {
+        btn.disabled = false;
+    }
+});
+
 document.getElementById('pick-folder').addEventListener('click', async () => {
     try {
         const res = await fetch('/pick-project-dir', { method: 'POST' });
@@ -86,5 +182,7 @@ document.getElementById('pick-folder').addEventListener('click', async () => {
         alert('Folder picker failed: ' + e);
     }
 });
+
+loadOrgs();
 </script>
 {% endblock %}
