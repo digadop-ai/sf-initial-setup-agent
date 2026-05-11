@@ -47,8 +47,8 @@ from xml.etree import ElementTree as ET
 
 # ── Constants ───────────────────────────────────────────────────────────────────
 
-DEFAULT_CHUNK_SIZE = 1500
-DEFAULT_CONCURRENCY = 6
+DEFAULT_CHUNK_SIZE = 500
+DEFAULT_CONCURRENCY = 15
 DEFAULT_WAIT_MINUTES = 60
 PROGRESS_INTERVAL_SECONDS = 5
 
@@ -97,6 +97,98 @@ EXPERIENCE_CLOUD_TYPES = (
     "CommunityTemplateDefinition",     # legacy community templates
     "CommunityThemeDefinition",        # legacy community themes
 )
+
+
+# Supplemental metadata types — feature-gated or recently-added types that some orgs
+# have but `sf org list metadata-types` (which calls describeMetadata) sometimes omits
+# in its output even when the org's Metadata API can retrieve them. The agent attempts
+# `sf org list metadata --metadata-type <T>` for each of these IN ADDITION to whatever
+# describeMetadata returns; if a type yields zero members it's silently skipped, so the
+# cost of a false positive is one extra empty list call.
+#
+# Curated snapshot at API v62. Categories: Experience Cloud, Industries Cloud (FSC,
+# Health, EPC, Loyalty, Manufacturing, Auto, Media, RLM, etc.), modern OmniStudio,
+# Einstein/GenAI/Bots, Data Cloud, modern settings types, and misc gotchas seen in
+# real orgs.
+SUPPLEMENTAL_METADATA_TYPES = [
+    # Experience Cloud
+    "ExperienceBundle", "Network", "NetworkBranding", "NavigationMenu",
+    "CommunityTemplateDefinition", "CommunityThemeDefinition", "ManagedTopics",
+    "SiteDotCom", "CustomSite", "Branding",
+    # Experience Cloud — modern "Build Your Own (LWR)" templates (post-Spring '22).
+    # `DigitalExperienceBundle` is distinct from `ExperienceBundle` — the former
+    # captures LWR site content (pages, components, theme), the latter the older
+    # Aura template content. Orgs running modern LWR communities lose all page
+    # content if this isn't enumerated. `DigitalExperience` is the parent
+    # container type; `NavigationLinkSet` is the modern navigation bundle.
+    "DigitalExperience", "DigitalExperienceBundle", "NavigationLinkSet",
+    # Industries — FSC
+    "IndustriesSettings", "IndustriesManufacturingSettings",
+    "IndustriesAutomotiveSettings", "IndustriesEinsteinFeatureSettings",
+    "IndustriesEventOrchestrationSettings", "IndustriesGamificationSettings",
+    "IndustriesLoyaltySettings", "IndustriesPricingSettings",
+    "IndustriesUnifiedPromotionsSettings", "IndustriesContextSettings",
+    "FinancialServicesCloudSettings", "InterestTaggingSettings",
+    # Industries — Health Cloud / Life Sciences
+    "HealthCloudSettings", "LifeSciencesSettings", "PatientMedicationDosage",
+    # Industries — EPC / RLM
+    "ProductAttributeSet", "ProductSpecificationType", "ProductSpecificationRecType",
+    "AttributeDefinition", "AttributeCategory", "AttributePicklist",
+    "QualifierDefinition", "BillingPolicy", "BillingTreatment",
+    "RevenueLifecycleManagementSettings", "OrderManagementSettings",
+    # Industries — Loyalty
+    "LoyaltyProgramSetup", "DecisionTable",
+    # Industries — Media / Public Sector / Energy
+    "MediaCloudSettings", "MarketAuditSettings", "PublicSectorSettings",
+    "ConsumptionSchedule", "EnergyAndUtilitiesSettings",
+    # Industries — Insurance
+    "ClaimAccessGrantStatus", "InsuranceClaimsSettings", "PolicyAdministrationSettings",
+    # Modern OmniStudio
+    "OmniProcess", "OmniIntegrationProcedure", "OmniDataTransform",
+    "OmniUiCard", "OmniScript", "OmniSupportedSettings",
+    # Einstein / Bots / GenAI
+    "Bot", "BotVersion", "BotBlock", "BotBlockVersion",
+    "EinsteinAgent", "GenAiPromptTemplate", "GenAiPlannerBundle", "GenAiFunction",
+    "GenAiPlugin", "GenAiPromptVersion", "MlPredictionDefinition",
+    "EinsteinAIViewConfig", "EinsteinAssistantSetting",
+    # Data Cloud / CDP
+    "DataPackageKitDefinition", "DataPackageKitObject", "DataKitObjectTemplate",
+    "DataStreamDefinition", "DataStreamTemplate", "DataConnectorIngestApi",
+    "DataConnectorS3", "MarketSegment", "MktDataLakeObject", "MktCalcInsightObject",
+    # Marketing-adjacent (the bits that DO live in core Metadata API)
+    "MarketingAppExtActivity", "MarketingAppExtension", "MobileApplicationDetail",
+    # Modern settings types
+    "ContextDefinition", "ConversationServiceIntegration", "ConversationVendorInfo",
+    "DigitalExperienceConfig", "DiscoveryAIModel", "DocumentChecklistSettings",
+    "EmailTemplateSettings", "EventDeliverySettings", "EventSubscription",
+    "ExternalCredential", "ExternalDataSource", "FieldRestrictionRule",
+    "ForecastingSettings", "FormulaSettings", "InvLatePymntRiskCalcSettings",
+    "LightningOnboardingConfig", "MailMergeSettings", "MfgServiceConsoleSettings",
+    "PaymentGatewayProvider", "PlatformSlackSettings",
+    "PrivacySettings", "RecommendationStrategy", "RetailExecutionSettings",
+    "SearchSettings", "ServicePresenceStatus", "ShareSettings",
+    "SubscriptionManagementSettings", "TimelineObjectDefinition", "TrialOrgSettings",
+    "WaveAutoInstallRequest", "WorkforceEngagementSettings",
+    # Misc gotchas
+    "ApexEmailNotifications", "AppMenu", "AssignmentRules", "AutoResponseRules",
+    "EclairGeoData", "EmbeddedServiceBranding", "EmbeddedServiceConfig",
+    "EmbeddedServiceFlowConfig", "EmbeddedServiceLiveAgent", "EmbeddedServiceMenuSettings",
+    "ExperiencePropertyTypeBundle", "MutingPermissionSet",
+    "PaymentFlexbenefitSetting", "ServiceChannel", "TimeSheetTemplate",
+    "TopicsForObjects", "TransactionSecurityPolicy", "WaveApplication",
+    "WaveDashboard", "WaveDataflow", "WaveLens", "WaveRecipe", "WaveTemplateBundle",
+    "WaveXmd",
+    # Org-wide translations (the language pack — distinct from CustomObjectTranslation
+    # per-object translations, which describeMetadata does surface).
+    "Translations",
+    # Permission Set License Definition — separate metadata from PermissionSet and
+    # PermissionSetLicense itself; defines what a permission set license grants.
+    "PermissionSetLicenseDefinition",
+    # Service Cloud Voice / legacy CTI call center config.
+    "CallCenter", "CallCenterRoutingMap",
+    # Einstein legacy / Service Assistant — still present in some orgs.
+    "AssistantContextItem", "AssistantDefinition",
+]
 
 
 # StandardValueSet doesn't appear in `sf org list metadata`. Hardcoded canonical list.
@@ -215,6 +307,93 @@ def enumerate_folders(alias: str, include_managed: bool) -> list[dict]:
     return rows
 
 
+def enumerate_folder_items(
+    alias: str,
+    folders: list[dict],
+    include_managed: bool,
+) -> dict[str, list[tuple[str, str]]]:
+    """Enumerate individual reports / dashboards / email templates / documents.
+
+    Returns a dict mapping metadata type → list of (folder_developer_name,
+    item_developer_name) tuples. Items in folders we don't have in the public-
+    folder enumeration (e.g. personal folders, namespaced folders when
+    include_managed is False) are dropped — they aren't deployable as metadata
+    via package.xml anyway.
+
+    Why this is needed: the Metadata API rejects `<members>FolderName/*</members>`
+    wildcard entries for folder-based types with "Entity not found". Each item
+    must be listed explicitly as `<members>FolderDevName/ItemDevName</members>`.
+    """
+    # Build lookup maps from the folder enumeration.
+    folder_id_to_dev: dict[str, str] = {}
+    folder_name_to_dev: dict[str, str] = {}
+    for f in folders:
+        dev = f.get("DeveloperName")
+        if not dev:
+            continue
+        if f.get("Id"):
+            folder_id_to_dev[f["Id"]] = dev
+        if f.get("Name"):
+            folder_name_to_dev[f["Name"]] = dev
+
+    out: dict[str, list[tuple[str, str]]] = {t: [] for t in FOLDER_BASED_METADATA_TYPES}
+
+    # Report: FolderName is the folder's display Name (with spaces); look it
+    # up in folder_name_to_dev to get the package.xml-friendly DeveloperName.
+    for r in sf_query(
+        alias,
+        "SELECT DeveloperName, FolderName, NamespacePrefix FROM Report "
+        "WHERE DeveloperName != null",
+    ):
+        if r.get("NamespacePrefix") and not include_managed:
+            continue
+        folder_dev = folder_name_to_dev.get(r.get("FolderName"))
+        if not folder_dev:
+            continue
+        out["Report"].append((folder_dev, r["DeveloperName"]))
+
+    # Dashboard: same FolderName (display Name) pattern as Report.
+    for r in sf_query(
+        alias,
+        "SELECT DeveloperName, FolderName, NamespacePrefix FROM Dashboard "
+        "WHERE DeveloperName != null",
+    ):
+        if r.get("NamespacePrefix") and not include_managed:
+            continue
+        folder_dev = folder_name_to_dev.get(r.get("FolderName"))
+        if not folder_dev:
+            continue
+        out["Dashboard"].append((folder_dev, r["DeveloperName"]))
+
+    # EmailTemplate: has FolderId; resolve through folder_id_to_dev.
+    for r in sf_query(
+        alias,
+        "SELECT DeveloperName, FolderId, NamespacePrefix FROM EmailTemplate "
+        "WHERE DeveloperName != null",
+    ):
+        if r.get("NamespacePrefix") and not include_managed:
+            continue
+        folder_dev = folder_id_to_dev.get(r.get("FolderId"))
+        if not folder_dev:
+            continue
+        out["EmailTemplate"].append((folder_dev, r["DeveloperName"]))
+
+    # Document: has FolderId; resolve through folder_id_to_dev.
+    for r in sf_query(
+        alias,
+        "SELECT DeveloperName, FolderId, NamespacePrefix FROM Document "
+        "WHERE DeveloperName != null",
+    ):
+        if r.get("NamespacePrefix") and not include_managed:
+            continue
+        folder_dev = folder_id_to_dev.get(r.get("FolderId"))
+        if not folder_dev:
+            continue
+        out["Document"].append((folder_dev, r["DeveloperName"]))
+
+    return out
+
+
 def enumerate_packages(alias: str) -> list[dict]:
     soql = (
         "SELECT Id, SubscriberPackageId, "
@@ -239,20 +418,27 @@ def enumerate_package_licenses(alias: str) -> list[dict]:
         return []
 
 
-def enumerate_org(alias: str, include_managed: bool) -> OrgEnumeration:
+def enumerate_org(
+    alias: str,
+    include_managed: bool,
+    max_workers: int = DEFAULT_CONCURRENCY,
+) -> OrgEnumeration:
     emit("enumerate_started")
     org = OrgEnumeration()
 
     types = list_metadata_types(alias)
     emit("metadata_types_listed", count=len(types))
 
-    for t in types:
-        if t in FOLDER_BASED_METADATA_TYPES:
-            continue
-        if t == "StandardValueSet":
-            continue
-        if t == "InstalledPackage" and not include_managed:
-            continue
+    # Types we handle outside of `sf org list metadata` (folder-based, hardcoded,
+    # or skipped when managed metadata is excluded).
+    types_to_enumerate = [
+        t for t in types
+        if t not in FOLDER_BASED_METADATA_TYPES
+        and t != "StandardValueSet"
+        and not (t == "InstalledPackage" and not include_managed)
+    ]
+
+    def _enum_one(t: str) -> tuple[str, list[str]]:
         members = list_metadata_members(alias, t)
         names: list[str] = []
         for m in members:
@@ -263,13 +449,55 @@ def enumerate_org(alias: str, include_managed: bool) -> OrgEnumeration:
             if ns and not include_managed:
                 continue
             names.append(full)
-        if names:
-            org.members_by_type[t] = sorted(set(names))
+        return t, sorted(set(names)) if names else []
+
+    total = len(types_to_enumerate)
+    completed = 0
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futures = [pool.submit(_enum_one, t) for t in types_to_enumerate]
+        for fut in concurrent.futures.as_completed(futures):
+            t, names = fut.result()
+            if names:
+                org.members_by_type[t] = names
+            completed += 1
+            if completed % 10 == 0 or completed == total:
+                emit("enumerate_progress", completed=completed, total=total)
 
     org.members_by_type["StandardValueSet"] = list(STANDARD_VALUE_SETS)
 
+    # Supplemental pass: try types not surfaced by describeMetadata (feature-gated,
+    # newly-added, etc.). For each supplemental type we run `sf org list metadata`;
+    # types that don't apply to this org return zero members and are skipped. We
+    # ALWAYS emit the start and end events so the user sees this phase in the log
+    # even when it's a no-op (i.e., describeMetadata already covered everything in
+    # our supplemental list).
+    already_seen = set(types) | FOLDER_BASED_METADATA_TYPES | {"StandardValueSet"}
+    supplemental_to_try = [t for t in SUPPLEMENTAL_METADATA_TYPES if t not in already_seen]
+    total_supp = len(supplemental_to_try)
+    emit("metadata_types_supplemental_listed", count=total_supp)
+    found = 0
+    if total_supp:
+        completed = 0
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
+            futures = [pool.submit(_enum_one, t) for t in supplemental_to_try]
+            for fut in concurrent.futures.as_completed(futures):
+                t, names = fut.result()
+                if names:
+                    org.members_by_type[t] = names
+                    found += 1
+                completed += 1
+                if completed % 10 == 0 or completed == total_supp:
+                    emit("enumerate_supplemental_progress",
+                         completed=completed, total=total_supp)
+    emit("metadata_types_supplemented",
+         types_tried=total_supp,
+         types_with_members=found)
+
     org.folders = enumerate_folders(alias, include_managed)
-    folder_members_by_type = _folder_members(org.folders)
+    folder_items = enumerate_folder_items(alias, org.folders, include_managed)
+    emit("folder_items_enumerated",
+         counts={t: len(v) for t, v in folder_items.items()})
+    folder_members_by_type = _folder_members(org.folders, folder_items)
     for type_name, members in folder_members_by_type.items():
         if members:
             org.members_by_type[type_name] = sorted(set(members))
@@ -297,13 +525,20 @@ def enumerate_org(alias: str, include_managed: bool) -> OrgEnumeration:
     return org
 
 
-def _folder_members(folders: list[dict]) -> dict[str, list[str]]:
-    """Convert Folder rows into per-type member lists.
+def _folder_members(
+    folders: list[dict],
+    folder_items: dict[str, list[tuple[str, str]]] | None = None,
+) -> dict[str, list[str]]:
+    """Convert Folder rows + per-item enumeration into per-type member lists.
 
-    For each non-managed folder, emit '<FolderName>' and '<FolderName>/*' so
-    both the folder itself and all items inside it retrieve. Manually add
-    'unfiled$public' for Report and EmailTemplate.
+    Emits:
+      - '<FolderDeveloperName>' for each public folder (the folder shell)
+      - '<FolderDeveloperName>/<ItemDeveloperName>' for each item in the folder,
+        from the explicit per-item enumeration (Metadata API rejects wildcard
+        '<FolderName>/*' for folder-based types).
+      - 'unfiled$public' for Report and EmailTemplate (the special unfiled folder).
     """
+    folder_items = folder_items or {}
     out: dict[str, list[str]] = {t: [] for t in FOLDER_BASED_METADATA_TYPES}
     for row in folders:
         folder_type = row.get("Type")
@@ -314,7 +549,9 @@ def _folder_members(folders: list[dict]) -> dict[str, list[str]]:
         if not name:
             continue
         out[meta_type].append(name)
-        out[meta_type].append(f"{name}/*")
+    for meta_type, pairs in folder_items.items():
+        for folder_dev, item_dev in pairs:
+            out[meta_type].append(f"{folder_dev}/{item_dev}")
     for meta_type in ("Report", "EmailTemplate"):
         out[meta_type].append("unfiled$public")
     return out
@@ -392,9 +629,13 @@ def write_manifest(path: Path, members_by_type: dict[str, list[str]], api_versio
 
 @dataclass
 class Chunk:
-    chunk_id: str
+    chunk_id: str                          # technical id, used for manifest filename + log path
     members_by_type: dict[str, list[str]]
     member_count: int
+    type_label: str = ""                   # human-readable label shown in UI / events
+    primary_type: str = ""                 # the main metadata type this chunk represents
+    sub_index: int = 0                     # 0 = single chunk, ≥1 = sub-chunk index when type splits
+    sub_total: int = 0                     # total sub-chunks for this type (if any)
     manifest_path: Optional[Path] = None
 
 
@@ -402,62 +643,133 @@ def build_chunks(
     members_by_type: dict[str, list[str]],
     chunk_size: int,
 ) -> list[Chunk]:
-    """Pack types into chunks of approximately `chunk_size` members.
+    """Build one chunk per metadata type (sub-chunking when count > chunk_size).
 
-    Special bundle: Profile + all PROFILE_SHAPE_DRIVERS go into the SAME chunks
-    so Profile retrieves with full fidelity. The shape drivers may also appear
-    in subsequent chunks (where they go on their own); duplication is harmless
-    because the retrieve writes to the same files either way.
+    Familiar UX: progress reads as "Retrieving CustomObject (1,247 members)…"
+    rather than "chunk-007", matching how Workbench / sfdx surface metadata.
+
+    Special bundle: Profile + all PROFILE_SHAPE_DRIVERS go into the SAME
+    chunk(s) so Profile retrieves with full fidelity (Salesforce only populates
+    a Profile's contents from members of types that are ALSO in the package.xml).
+    Shape drivers also appear in their own per-type chunks afterwards — the
+    duplication is harmless because retrieve writes to the same files either way.
     """
-    members_by_type = {k: list(v) for k, v in members_by_type.items()}
+    members_by_type = {k: list(v) for k, v in members_by_type.items() if v}
     chunks: list[Chunk] = []
 
+    # Profile bundle first
     profiles = members_by_type.pop("Profile", [])
     if profiles:
-        bundled: dict[str, list[str]] = {"Profile": list(profiles)}
+        driver_subset: dict[str, list[str]] = {}
         for driver in PROFILE_SHAPE_DRIVERS:
             members = members_by_type.get(driver, [])
             if members:
-                bundled[driver] = list(members)
-        chunks.extend(_pack_into_chunks(bundled, chunk_size, prefix="profile"))
+                driver_subset[driver] = list(members)
+        chunks.extend(_pack_profile_chunks(profiles, driver_subset, chunk_size))
 
-    chunks.extend(_pack_into_chunks(members_by_type, chunk_size, prefix="chunk"))
-    return chunks
-
-
-def _pack_into_chunks(
-    members_by_type: dict[str, list[str]],
-    chunk_size: int,
-    prefix: str,
-) -> list[Chunk]:
-    chunks: list[Chunk] = []
-    current: dict[str, list[str]] = {}
-    current_count = 0
-
-    def flush():
-        nonlocal current, current_count
-        if current_count == 0:
-            return
-        chunk_id = f"{prefix}-{len(chunks) + 1:03d}"
-        chunks.append(Chunk(chunk_id=chunk_id, members_by_type=current, member_count=current_count))
-        current = {}
-        current_count = 0
-
+    # One chunk per remaining type (sub-chunked if oversized)
     for type_name in sorted(members_by_type):
-        members = list(members_by_type[type_name])
-        while members:
-            room = chunk_size - current_count
-            if room <= 0:
-                flush()
-                room = chunk_size
-            take = members[:room]
-            members = members[room:]
-            current.setdefault(type_name, []).extend(take)
-            current_count += len(take)
-            if current_count >= chunk_size:
-                flush()
-    flush()
+        members = members_by_type[type_name]
+        if not members:
+            continue
+        chunks.extend(_pack_type_chunks(type_name, members, chunk_size))
     return chunks
+
+
+def _pack_type_chunks(
+    type_name: str,
+    members: list[str],
+    chunk_size: int,
+) -> list[Chunk]:
+    """Build one chunk for `type_name`, sub-chunked when len(members) > chunk_size."""
+    members = sorted(set(members))
+    n = len(members)
+    if n <= chunk_size:
+        return [Chunk(
+            chunk_id=_safe_chunk_id(type_name),
+            members_by_type={type_name: members},
+            member_count=n,
+            type_label=f"{type_name} ({n:,} members)",
+            primary_type=type_name,
+        )]
+    # Oversized type — split into parts
+    parts: list[Chunk] = []
+    sub_total = (n + chunk_size - 1) // chunk_size
+    for i in range(sub_total):
+        sub = members[i * chunk_size : (i + 1) * chunk_size]
+        sub_index = i + 1
+        parts.append(Chunk(
+            chunk_id=f"{_safe_chunk_id(type_name)}.{sub_index}",
+            members_by_type={type_name: sub},
+            member_count=len(sub),
+            type_label=f"{type_name} part {sub_index}/{sub_total} ({len(sub):,} members)",
+            primary_type=type_name,
+            sub_index=sub_index,
+            sub_total=sub_total,
+        ))
+    return parts
+
+
+def _pack_profile_chunks(
+    profiles: list[str],
+    driver_subset: dict[str, list[str]],
+    chunk_size: int,
+) -> list[Chunk]:
+    """Profile + ALL shape drivers in each chunk. Sub-chunk by *profile count* only.
+
+    Salesforce only populates a Profile's permission entries for the types that
+    share the same package.xml as the Profile. So every Profile chunk MUST
+    include the full driver set (CustomObject, ApexClass, Layout, etc.) — we
+    can't split drivers across Profile chunks without silently losing
+    permissions in the retrieved Profile XML.
+
+    `chunk_size` is therefore interpreted differently here than for normal
+    per-type chunks: it caps **profiles per chunk**, not total members. Drivers
+    are bundled in every chunk regardless. This makes Profile chunks "fat"
+    (e.g. 47 profiles + 2,190 drivers = 2,237 members in a single chunk) but
+    avoids the pathology where chunk_size < driver_count produced O(N profiles)
+    chunks each duplicating the entire driver set.
+    """
+    profiles = sorted(set(profiles))
+    drivers_clean = {k: sorted(set(v)) for k, v in driver_subset.items()}
+    driver_count = sum(len(v) for v in drivers_clean.values())
+    n = len(profiles)
+
+    if n == 0:
+        return []
+
+    if n <= chunk_size:
+        members = {"Profile": list(profiles), **drivers_clean}
+        return [Chunk(
+            chunk_id="Profile",
+            members_by_type=members,
+            member_count=n + driver_count,
+            type_label=f"Profile ({n:,} profiles + {driver_count:,} shape-driver members)",
+            primary_type="Profile",
+        )]
+
+    sub_total = (n + chunk_size - 1) // chunk_size
+    parts: list[Chunk] = []
+    for i in range(sub_total):
+        sub_profiles = profiles[i * chunk_size : (i + 1) * chunk_size]
+        sub_index = i + 1
+        members = {"Profile": list(sub_profiles), **drivers_clean}
+        parts.append(Chunk(
+            chunk_id=f"Profile.{sub_index}",
+            members_by_type=members,
+            member_count=len(sub_profiles) + driver_count,
+            type_label=f"Profile part {sub_index}/{sub_total} ({len(sub_profiles):,} profiles + {driver_count:,} shape-driver members)",
+            primary_type="Profile",
+            sub_index=sub_index,
+            sub_total=sub_total,
+        ))
+    return parts
+
+
+def _safe_chunk_id(type_name: str) -> str:
+    """Sanitize a metadata type name for use as a chunk id (filename, log path)."""
+    safe = "".join(c if c.isalnum() or c in "-_." else "_" for c in type_name)
+    return safe or "Unknown"
 
 
 # ── Parallel retrieve ───────────────────────────────────────────────────────────
@@ -471,6 +783,71 @@ class ChunkResult:
     log_path: Optional[Path] = None
     error: Optional[str] = None
     retried: bool = False
+    type_label: str = ""
+    primary_type: str = ""
+    sub_index: int = 0
+    sub_total: int = 0
+    members_attempted: int = 0
+    warnings: list[dict] = field(default_factory=list)
+
+
+# Known patterns in `result.messages` from `sf project retrieve start`. Each
+# pattern fragment, when found in a message's `problem` text, classifies the
+# warning into a category that downstream UI / summary code can group on.
+_WARNING_PATTERNS: list[tuple[str, str]] = [
+    # ExperienceBundle returns this for sites built with templates that the
+    # ExperienceBundle Metadata API doesn't serialize (Tabs+VF, Self-Service,
+    # legacy Communities templates like Recruiting / Partners). The community's
+    # other metadata (Community, Network, NetworkBranding, siteDotComSites,
+    # sites, navigationMenus, audiences) still comes through normally.
+    ("doesn't support the template", "experience_bundle_unsupported_template"),
+    # Member-level rejection: the API doesn't expose this specific entity. Common
+    # for managed-package internals (Conga, etc.) and for wildcard members that
+    # resolve to nothing.
+    ("cannot be found", "entity_not_found"),
+    # Permission denied on a specific member.
+    ("not accessible", "not_accessible"),
+    # API version mismatch on a specific member.
+    ("not available in version", "api_version_mismatch"),
+]
+
+
+def _classify_message(problem: str) -> str:
+    """Map a `result.messages[i].problem` string to a category tag."""
+    p = (problem or "").lower()
+    for fragment, category in _WARNING_PATTERNS:
+        if fragment in p:
+            return category
+    return "other"
+
+
+def _extract_warnings(result_obj: dict) -> list[dict]:
+    """Pull `result.messages` out of an sf retrieve JSON response and classify each.
+
+    Returns a list of {category, file_name, problem, member} dicts. `member` is
+    the package-member that triggered the warning when SF gives it to us
+    (parsed out of file_name like 'unpackaged/package.xml' or
+    'unpackaged/ExperienceBundle') — best-effort, missing for terse messages.
+    """
+    out: list[dict] = []
+    for m in result_obj.get("messages", []) or []:
+        problem = m.get("problem") or ""
+        file_name = m.get("fileName") or ""
+        member: Optional[str] = None
+        # SF often quotes the offending member name like:
+        #   "Entity of type 'Report' named 'Foo/Bar' cannot be found"
+        # Pull the second-quoted token out as best-effort.
+        if "'" in problem:
+            parts = problem.split("'")
+            if len(parts) >= 4:
+                member = parts[3]
+        out.append({
+            "category": _classify_message(problem),
+            "file_name": file_name,
+            "problem": problem,
+            "member": member,
+        })
+    return out
 
 
 def _watch_chunk(chunk_id: str, started_at: float, stop: threading.Event) -> None:
@@ -490,7 +867,13 @@ def retrieve_one(
 ) -> ChunkResult:
     log_path = log_dir / f"{chunk.chunk_id}.log"
     started_at = time.time()
-    emit("chunk_started", chunk_id=chunk.chunk_id, members=chunk.member_count)
+    emit("chunk_started",
+         chunk_id=chunk.chunk_id,
+         type_label=chunk.type_label,
+         primary_type=chunk.primary_type,
+         sub_index=chunk.sub_index,
+         sub_total=chunk.sub_total,
+         members=chunk.member_count)
 
     stop = threading.Event()
     watcher = threading.Thread(
@@ -526,43 +909,113 @@ def retrieve_one(
             f.write(proc.stderr)
 
         files_retrieved = 0
+        warnings: list[dict] = []
         try:
             data = json.loads(proc.stdout) if proc.stdout.strip() else {}
-            files = data.get("result", {}).get("files", [])
+            result_obj = data.get("result", {}) or {}
+            files = result_obj.get("files", [])
             files_retrieved = len(files)
+            warnings = _extract_warnings(result_obj)
         except json.JSONDecodeError:
             pass
 
         if proc.returncode == 0:
+            # Bucket warnings by category for the chunk_done payload.
+            warn_counts: dict[str, int] = {}
+            for w in warnings:
+                warn_counts[w["category"]] = warn_counts.get(w["category"], 0) + 1
             emit("chunk_done",
                  chunk_id=chunk.chunk_id,
+                 type_label=chunk.type_label,
+                 primary_type=chunk.primary_type,
                  elapsed_s=round(elapsed, 1),
-                 files=files_retrieved)
+                 files=files_retrieved,
+                 warnings_count=len(warnings),
+                 warnings_by_category=warn_counts)
+            # Emit a separate event with the full warning details so consumers
+            # (web UI dashboard, summary page, post-processing scripts) can
+            # render them without parsing the chunk log.
+            if warnings:
+                emit("chunk_warnings",
+                     chunk_id=chunk.chunk_id,
+                     primary_type=chunk.primary_type,
+                     count=len(warnings),
+                     by_category=warn_counts,
+                     samples=warnings[:20])
+                # Promote the Experience Cloud template-incompatibility case to
+                # a dedicated, high-signal event. This is the most common
+                # "looks like success but silently incomplete" failure mode in
+                # real-world retrieves — operators need to know which sites
+                # didn't serialize as ExperienceBundles so they can verify the
+                # community content was captured by sibling types (Community,
+                # Network, NetworkBranding, sites, siteDotComSites).
+                ec_warnings = [w for w in warnings
+                               if w["category"] == "experience_bundle_unsupported_template"]
+                if ec_warnings:
+                    affected: list[str] = []
+                    for w in ec_warnings:
+                        # The 'problem' text looks like:
+                        # "ExperienceBundle Metadata API doesn't support the template of SiteName."
+                        # Pull SiteName via the trailing "of <Name>." pattern.
+                        prob = w.get("problem", "")
+                        if "template of " in prob:
+                            tail = prob.split("template of ", 1)[1]
+                            site = tail.rstrip(".").strip()
+                            if site:
+                                affected.append(site)
+                    emit("warn_experience_cloud_template",
+                         chunk_id=chunk.chunk_id,
+                         affected_sites=sorted(set(affected)),
+                         note=("ExperienceBundle Metadata API doesn't serialize legacy "
+                               "templates (Tabs+VF, Self-Service, pre-Lightning Communities). "
+                               "Community structural metadata is still captured by Community, "
+                               "Network, NetworkBranding, sites, siteDotComSites, "
+                               "navigationMenus, and audiences types."))
             return ChunkResult(
                 chunk_id=chunk.chunk_id, success=True,
                 files_retrieved=files_retrieved,
                 elapsed_s=elapsed, log_path=log_path,
+                type_label=chunk.type_label,
+                primary_type=chunk.primary_type,
+                sub_index=chunk.sub_index,
+                sub_total=chunk.sub_total,
+                members_attempted=chunk.member_count,
+                warnings=warnings,
             )
         err = (proc.stderr or proc.stdout or "").strip().splitlines()[-1:]
         err_msg = err[0] if err else f"exit {proc.returncode}"
         emit("chunk_failed",
              chunk_id=chunk.chunk_id,
+             type_label=chunk.type_label,
+             primary_type=chunk.primary_type,
              elapsed_s=round(elapsed, 1),
              error=err_msg,
              log_path=str(log_path))
         return ChunkResult(
             chunk_id=chunk.chunk_id, success=False,
             elapsed_s=elapsed, log_path=log_path, error=err_msg,
+            type_label=chunk.type_label,
+            primary_type=chunk.primary_type,
+            sub_index=chunk.sub_index,
+            sub_total=chunk.sub_total,
+            members_attempted=chunk.member_count,
         )
     except subprocess.TimeoutExpired:
         elapsed = time.time() - started_at
         emit("chunk_failed",
              chunk_id=chunk.chunk_id,
+             type_label=chunk.type_label,
+             primary_type=chunk.primary_type,
              elapsed_s=round(elapsed, 1),
              error="subprocess timeout (wait window exceeded)")
         return ChunkResult(
             chunk_id=chunk.chunk_id, success=False,
             elapsed_s=elapsed, error="subprocess timeout",
+            type_label=chunk.type_label,
+            primary_type=chunk.primary_type,
+            sub_index=chunk.sub_index,
+            sub_total=chunk.sub_total,
+            members_attempted=chunk.member_count,
         )
     finally:
         stop.set()
@@ -598,6 +1051,8 @@ def retry_split(
             members_by_type=sub_members,
             member_count=len(half),
             manifest_path=manifest_path,
+            type_label=f"{failed.type_label} (retry {i}/2)",
+            primary_type=failed.primary_type,
         )
         result = retrieve_one(alias, sub_chunk, project_dir, log_dir, wait_minutes)
         result.retried = True
@@ -648,24 +1103,59 @@ def parallel_retrieve(
 # ── Summary ─────────────────────────────────────────────────────────────────────
 
 def write_summary(results: list[ChunkResult], summary_path: Path) -> None:
+    # Aggregate by primary metadata type for the summary page's per-type table.
+    by_type: dict[str, dict] = {}
+    for r in results:
+        key = r.primary_type or "(unknown)"
+        bucket = by_type.setdefault(key, {
+            "type": key,
+            "chunks": 0,
+            "chunks_succeeded": 0,
+            "chunks_failed": 0,
+            "members_attempted": 0,
+            "files_retrieved": 0,
+            "elapsed_s": 0.0,
+            "any_retried": False,
+        })
+        bucket["chunks"] += 1
+        bucket["chunks_succeeded"] += 1 if r.success else 0
+        bucket["chunks_failed"] += 0 if r.success else 1
+        bucket["members_attempted"] += r.members_attempted or 0
+        bucket["files_retrieved"] += r.files_retrieved if r.success else 0
+        bucket["elapsed_s"] += r.elapsed_s
+        bucket["any_retried"] = bucket["any_retried"] or r.retried
+        bucket.setdefault("warnings_count", 0)
+        bucket["warnings_count"] += len(r.warnings or [])
+    by_type_list = sorted(by_type.values(), key=lambda b: b["type"].lower())
+    for b in by_type_list:
+        b["elapsed_s"] = round(b["elapsed_s"], 1)
+
     payload = {
         "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "chunks": [
             {
                 "chunk_id": r.chunk_id,
+                "type_label": r.type_label,
+                "primary_type": r.primary_type,
+                "sub_index": r.sub_index,
+                "sub_total": r.sub_total,
+                "members_attempted": r.members_attempted,
                 "success": r.success,
                 "files_retrieved": r.files_retrieved,
                 "elapsed_s": round(r.elapsed_s, 1),
                 "log_path": str(r.log_path) if r.log_path else None,
                 "error": r.error,
                 "retried": r.retried,
+                "warnings": r.warnings or [],
             }
             for r in results
         ],
+        "by_type": by_type_list,
         "totals": {
             "succeeded": sum(1 for r in results if r.success),
             "failed": sum(1 for r in results if not r.success),
             "files_retrieved": sum(r.files_retrieved for r in results if r.success),
+            "type_count": len(by_type_list),
         },
     }
     summary_path.parent.mkdir(parents=True, exist_ok=True)
@@ -744,7 +1234,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     }
 
     try:
-        org = enumerate_org(args.alias, args.include_managed)
+        org = enumerate_org(args.alias, args.include_managed, max_workers=args.concurrency)
     except SfError as e:
         print(f"error during enumeration: {e}", file=sys.stderr)
         return 3
