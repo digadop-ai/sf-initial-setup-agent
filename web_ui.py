@@ -28,6 +28,7 @@ import platform
 import socket
 import subprocess
 import sys
+import time
 import urllib.request
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
@@ -53,6 +54,16 @@ AGENT_NAME = "sf-initial-setup-agent"
 DEFAULT_PORT = 8765
 PORT_ATTEMPTS = 10
 
+# Auto-shutdown timing (so the Terminal window closes after the agent finishes).
+# Behavior: as long as ≥1 dashboard tab is connected via WebSocket, the server
+# stays alive — the user is still watching. When all subscribers are gone AND
+# the session is in a terminal state (done / failed / cancelled), wait the
+# grace period and shut down. The user can override with "Stay open" (defer)
+# or "Quit now" (immediate) buttons in the completion banner.
+SHUTDOWN_GRACE_AFTER_CANCEL_S = 5
+SHUTDOWN_GRACE_AFTER_TERMINAL_S = 5
+SHUTDOWN_WATCHDOG_INTERVAL_S = 2
+
 
 # ── State ───────────────────────────────────────────────────────────────────────
 
@@ -66,6 +77,8 @@ class RetrieveSession:
     state: str = "running"          # running | done | failed | cancelled
     returncode: Optional[int] = None
     summary: Optional[dict] = None  # populated from manifest/retrieve-summary.json after exit
+    terminal_at: Optional[float] = None  # monotonic time when state moved to terminal
+    last_subscriber_at: Optional[float] = None  # monotonic time of last subscriber disconnect
 
     async def push(self, event: dict) -> None:
         self.events.append(event)
@@ -75,28 +88,40 @@ class RetrieveSession:
             except asyncio.QueueFull:
                 pass
 
+    def mark_terminal_if_needed(self) -> None:
+        if self.state in ("done", "failed", "cancelled") and self.terminal_at is None:
+            self.terminal_at = time.monotonic()
+
 
 @dataclass
 class AppState:
     config: dict[str, Any]
     session: Optional[RetrieveSession] = None
+    uvicorn_server: Optional[Any] = None  # set by start_server() so the watchdog can flip should_exit
 
 
 def _load_config() -> dict[str, Any]:
     if _CONFIG_PATH.is_file():
         try:
             with _CONFIG_PATH.open() as f:
-                return json.load(f)
+                cfg = json.load(f)
+            # v0.3.0 used project_parent_dir as the parent of an auto-suffixed
+            # <alias>-metadata folder. v0.3.1+ uses project_dir as the project
+            # root directly. Carry the old parent path forward so the user only
+            # has to adjust, not re-pick.
+            if "project_parent_dir" in cfg and "project_dir" not in cfg:
+                cfg["project_dir"] = cfg.pop("project_parent_dir")
+            return cfg
         except (OSError, json.JSONDecodeError):
             pass
     return {
         "alias": "",
-        "project_parent_dir": "",
+        "project_dir": "",
         "include_managed": True,
         "exclude_expired_packages": False,
         "exclude_namespaces": "",
-        "concurrency": 6,
-        "chunk_size": 1500,
+        "concurrency": 15,
+        "chunk_size": 500,
         "wait_minutes": 60,
     }
 
@@ -108,8 +133,7 @@ def _save_config(config: dict[str, Any]) -> None:
 
 
 def _project_dir_from_config(cfg: dict[str, Any]) -> Path:
-    parent = Path(cfg["project_parent_dir"]).expanduser()
-    return parent / f"{cfg['alias']}-metadata"
+    return Path(cfg["project_dir"]).expanduser()
 
 
 state = AppState(config=_load_config())
@@ -147,20 +171,35 @@ def detect_api_version(alias: str) -> str:
 
 
 def ensure_scaffolded(project_dir: Path, alias: str) -> dict:
-    """Create SFDX project if missing; pin sourceApiVersion to org max. Idempotent."""
+    """Create SFDX project if missing; pin sourceApiVersion to org max. Idempotent.
+
+    Handles two cases:
+    - project_dir doesn't exist → use `sf project generate` to scaffold cleanly.
+    - project_dir exists but lacks sfdx-project.json → write a minimal one in-place
+      (avoids `sf project generate` failure on existing target directories).
+    """
     sfdx_proj = project_dir / "sfdx-project.json"
     scaffolded_now = False
     if not sfdx_proj.is_file():
-        parent = project_dir.parent
-        name = project_dir.name
-        parent.mkdir(parents=True, exist_ok=True)
-        result = subprocess.run(
-            ["sf", "project", "generate", "--name", name, "--output-dir", str(parent),
-             "--default-package-dir", "force-app"],
-            capture_output=True, text=True, timeout=120,
-        )
-        if result.returncode != 0:
-            raise RuntimeError(f"`sf project generate` failed: {result.stderr or result.stdout}")
+        if project_dir.is_dir():
+            (project_dir / "force-app").mkdir(parents=True, exist_ok=True)
+            sfdx_proj.write_text(json.dumps({
+                "packageDirectories": [{"path": "force-app", "default": True}],
+                "namespace": "",
+                "sfdcLoginUrl": "https://login.salesforce.com",
+                "sourceApiVersion": "62.0",
+            }, indent=2))
+        else:
+            parent = project_dir.parent
+            name = project_dir.name
+            parent.mkdir(parents=True, exist_ok=True)
+            result = subprocess.run(
+                ["sf", "project", "generate", "--name", name, "--output-dir", str(parent),
+                 "--default-package-dir", "force-app"],
+                capture_output=True, text=True, timeout=120,
+            )
+            if result.returncode != 0:
+                raise RuntimeError(f"`sf project generate` failed: {result.stderr or result.stdout}")
         scaffolded_now = True
 
     api_version = detect_api_version(alias)
@@ -248,21 +287,149 @@ def write_sync_state(project_dir: Path, alias: str, summary: dict) -> Path:
 
 # ── App lifecycle ───────────────────────────────────────────────────────────────
 
+async def _shutdown_watchdog() -> None:
+    """Periodically check whether to shut the server down so the Terminal closes.
+
+    Logic:
+    - While the session is `running`: do nothing.
+    - Once terminal: emit `shutdown_kept_alive` if dashboard tabs are connected
+      (so the user sees that's why the server hasn't gone down yet), and stay up.
+    - When all subscribers disconnect: start the grace timer from
+      `last_subscriber_at` and emit `shutdown_scheduled` with a countdown.
+    - When grace elapses: emit `shutdown_now`, flip `should_exit`, exit.
+    - User can press "Stay open" (`/defer-shutdown`) to push the timer 10 min out,
+      or "Quit now" (`/shutdown-now`) to flip `should_exit` immediately.
+
+    `_last_status` tracks the most recently emitted lifecycle event so we don't
+    spam the dashboard with duplicates each tick.
+    """
+    last_status: Optional[str] = None  # None | "kept_alive" | "scheduled" | "imminent"
+    while True:
+        try:
+            await asyncio.sleep(SHUTDOWN_WATCHDOG_INTERVAL_S)
+            sess = state.session
+            server = state.uvicorn_server
+            if sess is None or server is None:
+                continue
+            if sess.state == "running":
+                last_status = None
+                continue
+            sess.mark_terminal_if_needed()
+
+            grace = (SHUTDOWN_GRACE_AFTER_CANCEL_S
+                     if sess.state == "cancelled"
+                     else SHUTDOWN_GRACE_AFTER_TERMINAL_S)
+
+            if sess.subscribers:
+                # Dashboard tab(s) open — keep server alive. Emit once per
+                # transition into this state so the user sees an explanation.
+                if last_status != "kept_alive":
+                    await sess.push({
+                        "event": "shutdown_kept_alive",
+                        "subscriber_count": len(sess.subscribers),
+                        "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                    })
+                    last_status = "kept_alive"
+                continue
+
+            # No subscribers — measure grace from when the last one left
+            # (or fall back to terminal transition if subscribers never connected).
+            now = time.monotonic()
+            ref = sess.last_subscriber_at or sess.terminal_at or now
+            remaining = grace - (now - ref)
+
+            if remaining > 0:
+                if last_status != "scheduled":
+                    shutdown_at = datetime.now(timezone.utc).timestamp() + remaining
+                    await sess.push({
+                        "event": "shutdown_scheduled",
+                        "shutdown_at_epoch": shutdown_at,
+                        "grace_s": grace,
+                        "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                    })
+                    last_status = "scheduled"
+                continue
+
+            # Grace elapsed — fire shutdown.
+            if last_status != "imminent":
+                await sess.push({
+                    "event": "shutdown_now",
+                    "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                })
+                last_status = "imminent"
+            # Give the WS push a moment to flush before uvicorn tears down.
+            await asyncio.sleep(0.5)
+            server.should_exit = True
+            return
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # Watchdog must never crash the app; swallow and keep looping.
+            continue
+
+
+def _defer_shutdown(sess: "RetrieveSession", extra_seconds: int = 600) -> None:
+    """Push the watchdog's grace reference points forward by extra_seconds.
+
+    Called from /defer-shutdown when the user clicks "Stay open" on the banner.
+    Bumps both terminal_at and last_subscriber_at so neither path through the
+    watchdog can fire shutdown until the deferred window elapses.
+    """
+    future = time.monotonic() + extra_seconds
+    sess.terminal_at = future
+    sess.last_subscriber_at = future
+
+
+def _shutdown_now(sess: "RetrieveSession") -> None:
+    """Force the watchdog to fire on its next tick (≤ SHUTDOWN_WATCHDOG_INTERVAL_S)."""
+    long_ago = time.monotonic() - 10_000
+    sess.terminal_at = long_ago
+    sess.last_subscriber_at = long_ago
+    sess.subscribers.clear()  # so the kept_alive branch doesn't hold us
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    yield
-    sess = state.session
-    if sess and sess.proc and sess.proc.returncode is None:
-        sess.proc.terminate()
+    watchdog = asyncio.create_task(_shutdown_watchdog())
+    try:
+        yield
+    finally:
+        watchdog.cancel()
         try:
-            await asyncio.wait_for(sess.proc.wait(), timeout=5)
-        except asyncio.TimeoutError:
-            sess.proc.kill()
+            await watchdog
+        except (asyncio.CancelledError, Exception):
+            pass
+        sess = state.session
+        if sess and sess.proc and sess.proc.returncode is None:
+            sess.proc.terminate()
+            try:
+                await asyncio.wait_for(sess.proc.wait(), timeout=5)
+            except asyncio.TimeoutError:
+                sess.proc.kill()
 
 
 app = FastAPI(title="sf-initial-setup-agent", lifespan=lifespan)
 templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))
 app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
+
+# Asset cache-buster — appended as ?v=<token> to /static URLs in base.html.
+# Token is the max mtime of any file under /static, hashed and truncated. That
+# way the browser only refetches when something actually changed (so a normal
+# agent restart doesn't force a refetch — but an edit to app.js or app.css
+# does, even mid-session). If the static dir disappears or the stat fails for
+# any reason, we fall back to the process boot time so we still bust caches
+# when the agent process restarts.
+def _asset_version() -> str:
+    try:
+        latest_mtime = max(
+            (p.stat().st_mtime for p in _STATIC_DIR.rglob("*") if p.is_file()),
+            default=time.time(),
+        )
+        return hashlib.sha1(str(latest_mtime).encode()).hexdigest()[:10]
+    except OSError:
+        return hashlib.sha1(str(time.time()).encode()).hexdigest()[:10]
+
+templates.env.globals["asset_version"] = _asset_version()
 
 
 # ── Routes: wizard ──────────────────────────────────────────────────────────────
@@ -280,7 +447,7 @@ async def root(request: Request):
 @app.post("/wizard")
 async def wizard_submit(
     alias: str = Form(...),
-    project_parent_dir: str = Form(...),
+    project_dir: str = Form(...),
     include_managed: str = Form(""),
     exclude_expired_packages: str = Form(""),
     exclude_namespaces: str = Form(""),
@@ -290,7 +457,7 @@ async def wizard_submit(
 ):
     state.config = {
         "alias": alias.strip(),
-        "project_parent_dir": project_parent_dir.strip(),
+        "project_dir": project_dir.strip(),
         "include_managed": include_managed == "on",
         "exclude_expired_packages": exclude_expired_packages == "on",
         "exclude_namespaces": exclude_namespaces.strip(),
@@ -299,6 +466,12 @@ async def wizard_submit(
         "wait_minutes": wait_minutes,
     }
     _save_config(state.config)
+    # Forget the previous session so the dashboard doesn't replay a prior run's
+    # terminal events (process_exited, etc.) and falsely show "Retrieve
+    # complete" before the user has even clicked Start. The wizard_submit path
+    # is only reachable when no retrieve is running (the wizard route redirects
+    # to /dashboard when a session is in flight), so this is always safe.
+    state.session = None
     return RedirectResponse("/dashboard", status_code=303)
 
 
@@ -401,7 +574,7 @@ async def pick_project_dir():
     try:
         result = subprocess.run(
             ["osascript", "-e",
-             'POSIX path of (choose folder with prompt "Pick project parent directory")'],
+             'POSIX path of (choose folder with prompt "Pick project directory")'],
             capture_output=True, text=True, timeout=300,
         )
     except subprocess.TimeoutExpired:
@@ -416,11 +589,23 @@ async def pick_project_dir():
 
 @app.get("/dashboard", response_class=HTMLResponse)
 async def dashboard(request: Request):
+    project_dir_str = ""
+    project_parent = ""
+    project_leaf = ""
+    if state.config.get("alias") and state.config.get("project_dir"):
+        pd = _project_dir_from_config(state.config)
+        project_dir_str = str(pd)
+        # Split parent/leaf so the template can emphasize the destination folder.
+        # If the user picked the filesystem root, leaf is empty — fall back to "/".
+        project_parent = str(pd.parent) if pd.name else ""
+        project_leaf = pd.name or "/"
     return templates.TemplateResponse("dashboard.html", {
         "request": request,
         "config": state.config,
         "session": state.session,
-        "project_dir": str(_project_dir_from_config(state.config)) if state.config.get("alias") else "",
+        "project_dir": project_dir_str,
+        "project_parent": project_parent,
+        "project_leaf": project_leaf,
     })
 
 
@@ -429,13 +614,39 @@ async def start_retrieve():
     if state.session is not None and state.session.state == "running":
         raise HTTPException(status_code=409, detail="Retrieve already running")
     cfg = state.config
-    if not cfg.get("alias") or not cfg.get("project_parent_dir"):
-        raise HTTPException(status_code=400, detail="Configure alias and project parent dir via the wizard first")
+    if not cfg.get("alias") or not cfg.get("project_dir"):
+        raise HTTPException(status_code=400, detail="Configure alias and project dir via the wizard first")
 
     project_dir = _project_dir_from_config(cfg)
+
+    # IMPORTANT: install the new session into state.session BEFORE the slow
+    # ensure_scaffolded step. Otherwise any WS reconnect that races during
+    # scaffolding (browser auto-reconnects ~1s after the click-time ws.close)
+    # picks up the *previous* session and replays its terminal events — the
+    # dashboard then thinks the new retrieve is already complete. Creating
+    # the empty new session up-front means the racing WS subscribes to it
+    # cleanly: empty event list to replay, then events flow as they happen.
+    sess = RetrieveSession(config=cfg, started_at=datetime.now(timezone.utc))
+    state.session = sess
+
     try:
         ensure_scaffolded(project_dir, cfg["alias"])
     except Exception as e:
+        # Mark the new session failed and emit a terminal event so the
+        # dashboard transitions out of optimistic "running" cleanly.
+        sess.state = "failed"
+        sess.mark_terminal_if_needed()
+        await sess.push({
+            "event": "log",
+            "message": f"Project setup failed: {e}",
+            "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        })
+        await sess.push({
+            "event": "process_exited",
+            "returncode": -1,
+            "state": "failed",
+            "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        })
         raise HTTPException(status_code=500, detail=f"Project setup failed: {e}")
 
     args = [
@@ -443,8 +654,8 @@ async def start_retrieve():
         "--alias", cfg["alias"],
         "--directory", str(project_dir),
         "--include-managed", "true" if cfg.get("include_managed", True) else "false",
-        "--concurrency", str(cfg.get("concurrency", 6)),
-        "--chunk-size", str(cfg.get("chunk_size", 1500)),
+        "--concurrency", str(cfg.get("concurrency", 15)),
+        "--chunk-size", str(cfg.get("chunk_size", 500)),
         "--wait-minutes", str(cfg.get("wait_minutes", 60)),
     ]
     if cfg.get("exclude_expired_packages"):
@@ -452,8 +663,6 @@ async def start_retrieve():
     if cfg.get("exclude_namespaces"):
         args.extend(["--exclude-namespaces", cfg["exclude_namespaces"]])
 
-    sess = RetrieveSession(config=cfg, started_at=datetime.now(timezone.utc))
-    state.session = sess
     sess.proc = await asyncio.create_subprocess_exec(
         *args,
         stdout=asyncio.subprocess.PIPE,
@@ -461,6 +670,30 @@ async def start_retrieve():
     )
     asyncio.create_task(_consume_subprocess(sess, project_dir))
     return JSONResponse({"started": True, "pid": sess.proc.pid})
+
+
+@app.post("/defer-shutdown")
+async def defer_shutdown():
+    """User clicked "Stay open" on the completion banner — push shutdown 10 min out."""
+    sess = state.session
+    if not sess:
+        raise HTTPException(status_code=409, detail="No session")
+    _defer_shutdown(sess, extra_seconds=600)
+    await sess.push({
+        "event": "shutdown_deferred",
+        "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+    })
+    return JSONResponse({"deferred": True, "extra_seconds": 600})
+
+
+@app.post("/shutdown-now")
+async def shutdown_now_route():
+    """User clicked "Quit now" on the completion banner — fire watchdog immediately."""
+    sess = state.session
+    if not sess:
+        raise HTTPException(status_code=409, detail="No session")
+    _shutdown_now(sess)
+    return JSONResponse({"shutting_down": True})
 
 
 @app.post("/cancel-retrieve")
@@ -471,6 +704,7 @@ async def cancel_retrieve():
     if sess.proc and sess.proc.returncode is None:
         sess.proc.terminate()
         sess.state = "cancelled"
+        sess.mark_terminal_if_needed()
         await sess.push({
             "event": "cancelled",
             "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -514,6 +748,8 @@ async def ws_progress(ws: WebSocket):
         pass
     finally:
         sess.subscribers.discard(queue)
+        if not sess.subscribers:
+            sess.last_subscriber_at = time.monotonic()
 
 
 # ── Subprocess plumbing ─────────────────────────────────────────────────────────
@@ -547,6 +783,7 @@ async def _consume_subprocess(sess: RetrieveSession, project_dir: Path) -> None:
     sess.returncode = rc
     if sess.state == "running":
         sess.state = "done" if rc == 0 else "failed"
+    sess.mark_terminal_if_needed()
 
     summary_path = project_dir / "manifest" / "retrieve-summary.json"
     if summary_path.is_file():
@@ -653,7 +890,20 @@ def find_free_port(start: int = DEFAULT_PORT, attempts: int = PORT_ATTEMPTS) -> 
 
 
 def start_server(host: str = "127.0.0.1", port: int = DEFAULT_PORT) -> None:
-    uvicorn.run(app, host=host, port=port, log_level="info")
+    """Run uvicorn until either Ctrl+C or the watchdog flips should_exit.
+
+    Uses uvicorn.Server (rather than uvicorn.run) so the in-app watchdog can
+    request a clean shutdown when the retrieve has reached a terminal state
+    and no live dashboard subscribers remain. That clean exit is what lets
+    the parent .command launcher proceed to close its Terminal window.
+    """
+    config = uvicorn.Config(app, host=host, port=port, log_level="info")
+    server = uvicorn.Server(config)
+    state.uvicorn_server = server
+    try:
+        server.run()
+    finally:
+        state.uvicorn_server = None
 
 
 if __name__ == "__main__":

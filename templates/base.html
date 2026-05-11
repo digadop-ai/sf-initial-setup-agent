@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>{% block title %}sf-initial-setup-agent{% endblock %}</title>
-    <link rel="stylesheet" href="{{ url_for('static', path='/app.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', path='/app.css') }}?v={{ asset_version }}">
 </head>
 <body>
     <header class="app-header">
@@ -26,6 +26,6 @@
         </div>
     </footer>
     {% block scripts %}{% endblock %}
-    <script src="{{ url_for('static', path='/app.js') }}"></script>
+    <script src="{{ url_for('static', path='/app.js') }}?v={{ asset_version }}"></script>
 </body>
 </html>

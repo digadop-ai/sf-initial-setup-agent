@@ -17,16 +17,48 @@
         {% if summary %}
             <h3>Totals</h3>
             <ul>
+                <li>Metadata types retrieved: {{ summary.totals.type_count or '—' }}</li>
                 <li>Chunks succeeded: {{ summary.totals.succeeded }}</li>
                 <li>Chunks failed: {{ summary.totals.failed }}</li>
                 <li>Files retrieved: {{ summary.totals.files_retrieved }}</li>
             </ul>
 
+            {% if summary.by_type %}
+            <h3>By metadata type</h3>
+            <table class="chunks">
+                <thead>
+                    <tr>
+                        <th>Metadata type</th>
+                        <th>Members</th>
+                        <th>Files retrieved</th>
+                        <th>Chunks (ok / failed)</th>
+                        <th>Warnings</th>
+                        <th>Elapsed (s)</th>
+                        <th>Notes</th>
+                    </tr>
+                </thead>
+                <tbody>
+                {% for b in summary.by_type %}
+                    <tr class="chunk-row state-{{ 'done' if b.chunks_failed == 0 else 'failed' }}">
+                        <td><code>{{ b.type }}</code></td>
+                        <td>{{ '{:,}'.format(b.members_attempted) }}</td>
+                        <td>{{ '{:,}'.format(b.files_retrieved) }}</td>
+                        <td>{{ b.chunks_succeeded }} / {{ b.chunks_failed }}</td>
+                        <td>{% if b.warnings_count %}<strong>{{ b.warnings_count }}</strong>{% else %}—{% endif %}</td>
+                        <td>{{ b.elapsed_s }}</td>
+                        <td>{% if b.any_retried %}retry split fired{% endif %}</td>
+                    </tr>
+                {% endfor %}
+                </tbody>
+            </table>
+            {% endif %}
+
             <h3>Chunks</h3>
             <table class="chunks">
                 <thead>
                     <tr>
-                        <th>Chunk</th>
+                        <th>Metadata type</th>
+                        <th>Members</th>
                         <th>Outcome</th>
                         <th>Files</th>
                         <th>Elapsed (s)</th>
@@ -37,7 +69,11 @@
                 <tbody>
                 {% for c in summary.chunks %}
                     <tr class="chunk-row state-{{ 'done' if c.success else 'failed' }}">
-                        <td><code>{{ c.chunk_id }}</code></td>
+                        <td>
+                            <strong>{{ c.primary_type or c.chunk_id }}</strong>
+                            {% if c.sub_total %}<small> · part {{ c.sub_index }}/{{ c.sub_total }}</small>{% endif %}
+                        </td>
+                        <td>{{ '{:,}'.format(c.members_attempted) if c.members_attempted else '—' }}</td>
                         <td>{{ 'succeeded' if c.success else 'failed' }}</td>
                         <td>{{ c.files_retrieved }}</td>
                         <td>{{ c.elapsed_s }}</td>

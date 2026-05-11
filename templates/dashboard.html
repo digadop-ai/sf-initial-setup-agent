@@ -1,12 +1,34 @@
 {% extends "base.html" %}
 {% block title %}Dashboard · sf-initial-setup-agent{% endblock %}
 {% block content %}
+<div id="completion-banner" class="completion-banner" hidden>
+    <div class="completion-banner-inner container">
+        <span class="completion-icon" aria-hidden="true"></span>
+        <div class="completion-text">
+            <strong class="completion-headline"></strong>
+            <span class="completion-detail"></span>
+            <span class="completion-countdown" hidden></span>
+        </div>
+        <a class="completion-summary-btn" href="/summary">View summary →</a>
+        <button type="button" class="completion-stayopen" hidden>Stay open</button>
+        <button type="button" class="completion-quitnow" hidden>Quit now</button>
+        <button type="button" class="completion-close" aria-label="Dismiss">×</button>
+    </div>
+</div>
+
 <section>
     <h2>Retrieve dashboard</h2>
 
     <div class="config-summary">
         <div><strong>Alias:</strong> {{ config.alias or '—' }}</div>
-        <div><strong>Project dir:</strong> <code>{{ project_dir or '—' }}</code></div>
+        <div class="project-path-row">
+            <strong>Retrieving into:</strong>
+            {% if project_leaf %}
+                <code class="project-path"><span class="project-parent">{{ project_parent }}{% if project_parent and not project_parent.endswith('/') %}/{% endif %}</span><span class="project-leaf">{{ project_leaf }}</span></code>
+            {% else %}
+                <code>—</code>
+            {% endif %}
+        </div>
         <div><strong>Concurrency:</strong> {{ config.concurrency }} · <strong>Chunk size:</strong> {{ config.chunk_size }} · <strong>Wait/chunk:</strong> {{ config.wait_minutes }}m</div>
         <div><strong>Managed:</strong> {{ 'included' if config.include_managed else 'excluded' }}{% if config.exclude_expired_packages %} · expired packages dropped{% endif %}{% if config.exclude_namespaces %} · namespace excludes: <code>{{ config.exclude_namespaces }}</code>{% endif %}</div>
     </div>
@@ -25,11 +47,15 @@
         </span>
     </div>
 
-    <h3>Chunks</h3>
+    <div id="setup-status" class="setup-status" hidden>
+        <span id="setup-status-text"></span>
+    </div>
+
+    <h3>Retrievals by metadata type</h3>
     <table id="chunk-table" class="chunks">
         <thead>
             <tr>
-                <th>Chunk</th>
+                <th>Metadata type</th>
                 <th>State</th>
                 <th>Members</th>
                 <th>Files</th>
@@ -39,10 +65,10 @@
         </thead>
         <tbody></tbody>
     </table>
-    <p id="chunk-empty" class="hint">No chunks yet. Click <em>Start retrieve</em> to begin.</p>
+    <p id="chunk-empty" class="hint">No types retrieved yet. Click <em>Start retrieve</em> to begin.</p>
 
     <h3>Event log</h3>
-    <pre id="event-log" class="event-log"></pre>
+    <div id="event-log" class="event-log" role="log" aria-live="polite"></div>
 </section>
 {% endblock %}
 {% block scripts %}

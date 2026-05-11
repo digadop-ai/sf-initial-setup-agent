@@ -147,6 +147,21 @@ button.danger:hover:not(:disabled) { background: var(--error-bg); }
     font-size: 0.95rem;
 }
 
+.project-path-row { display: flex; align-items: baseline; gap: 0.55rem; flex-wrap: wrap; }
+.project-path {
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    font-size: 0.9em;
+    background: rgba(0,0,0,0.04);
+    padding: 0.15em 0.5em;
+    border-radius: 4px;
+    word-break: break-all;
+}
+.project-parent { color: var(--muted); }
+.project-leaf {
+    color: var(--accent);
+    font-weight: 700;
+}
+
 .pill {
     display: inline-block;
     padding: 0.15rem 0.6rem;
@@ -162,6 +177,34 @@ button.danger:hover:not(:disabled) { background: var(--error-bg); }
 .pill.state-done    { background: var(--success-bg); color: var(--success); }
 .pill.state-failed,
 .pill.state-cancelled { background: var(--error-bg); color: var(--error); }
+
+.setup-status {
+    margin: 1.25rem 0 0;
+    padding: 0.7rem 1rem 0.7rem 2.4rem;
+    position: relative;
+    background: var(--accent-bg);
+    color: var(--accent);
+    border: 1px solid #cfe1f8;
+    border-radius: 6px;
+    font-size: 0.95rem;
+    font-weight: 500;
+}
+.setup-status::before {
+    content: "";
+    position: absolute;
+    left: 0.85rem;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 0.95rem;
+    height: 0.95rem;
+    border: 2px solid var(--accent);
+    border-top-color: transparent;
+    border-radius: 50%;
+    animation: setup-spin 0.85s linear infinite;
+}
+@keyframes setup-spin {
+    to { transform: translateY(-50%) rotate(360deg); }
+}
 
 table.chunks {
     width: 100%;
@@ -193,17 +236,164 @@ tr.chunk-row.state-failed  td:nth-child(2) { color: var(--error); font-weight: 5
 tr.chunk-row .err          { color: var(--error); }
 
 .event-log {
-    background: #1e1e1e;
-    color: #e0e0e0;
-    padding: 0.85rem 1rem;
+    background: var(--surface);
+    color: var(--text);
+    border: 1px solid var(--border);
     border-radius: 6px;
-    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
-    font-size: 0.82rem;
+    font-size: 0.93rem;
     max-height: 24rem;
     overflow-y: auto;
-    white-space: pre-wrap;
-    word-break: break-word;
 }
+.event-log:empty::before {
+    content: "No events yet.";
+    display: block;
+    padding: 0.75rem 1rem;
+    color: var(--muted);
+    font-style: italic;
+}
+
+.event-row {
+    display: flex;
+    gap: 0.85rem;
+    align-items: baseline;
+    padding: 0.55rem 1rem;
+    border-bottom: 1px solid var(--border);
+}
+.event-row:last-child { border-bottom: none; }
+.event-time {
+    flex: 0 0 4.5rem;
+    color: var(--muted);
+    font-size: 0.82rem;
+    font-variant-numeric: tabular-nums;
+}
+.event-icon {
+    flex: 0 0 1.1rem;
+    text-align: center;
+    color: var(--muted);
+    font-weight: 700;
+    font-size: 0.95rem;
+    line-height: 1;
+}
+.event-msg {
+    flex: 1;
+    word-break: break-word;
+    line-height: 1.35;
+}
+.event-msg code, .event-msg .event-num {
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    font-size: 0.86em;
+    background: rgba(0, 0, 0, 0.04);
+    padding: 0.05em 0.3em;
+    border-radius: 3px;
+}
+
+.event-row.event-info    .event-icon { color: var(--info); }
+.event-row.event-success .event-icon { color: var(--success); }
+.event-row.event-warn    .event-icon { color: var(--warn); }
+.event-row.event-error   .event-icon { color: var(--error); }
+.event-row.event-step    .event-icon { color: var(--accent); }
+
+/* ── completion banner ─────────────────────────────────────────────────── */
+
+.completion-banner {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    z-index: 1000;
+    color: white;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.18);
+    animation: completion-slide-in 0.45s cubic-bezier(0.2, 0.9, 0.3, 1.2) both;
+}
+.completion-banner.state-done      { background: linear-gradient(90deg, #1b5e20 0%, #2e7d32 50%, #43a047 100%); }
+.completion-banner.state-failed    { background: linear-gradient(90deg, #8e0000 0%, #c62828 50%, #e53935 100%); }
+.completion-banner.state-cancelled { background: linear-gradient(90deg, #424242 0%, #616161 50%, #757575 100%); }
+
+.completion-banner.pulsing {
+    animation:
+        completion-slide-in 0.45s cubic-bezier(0.2, 0.9, 0.3, 1.2) both,
+        completion-pulse 1.6s ease-in-out 0.5s 3;
+}
+
+.completion-banner-inner {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    padding: 1rem 1.5rem;
+}
+
+.completion-icon {
+    flex: 0 0 auto;
+    width: 2.5rem;
+    height: 2.5rem;
+    border-radius: 50%;
+    background: rgba(255, 255, 255, 0.2);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1.6rem;
+    font-weight: 700;
+}
+.completion-banner.state-done      .completion-icon::before { content: "✓"; }
+.completion-banner.state-failed    .completion-icon::before { content: "✗"; }
+.completion-banner.state-cancelled .completion-icon::before { content: "⏹"; }
+
+.completion-text { flex: 1; display: flex; flex-direction: column; gap: 0.15rem; min-width: 0; }
+.completion-headline { font-size: 1.2rem; font-weight: 700; letter-spacing: 0.01em; }
+.completion-detail   { font-size: 0.95rem; opacity: 0.92; }
+.completion-countdown { font-size: 0.85rem; opacity: 0.85; font-variant-numeric: tabular-nums; }
+.completion-stayopen,
+.completion-quitnow {
+    background: rgba(255, 255, 255, 0.18);
+    color: white;
+    border: 1px solid rgba(255, 255, 255, 0.55);
+    border-radius: 4px;
+    padding: 0.5rem 0.85rem;
+    font-weight: 600;
+    cursor: pointer;
+    font-size: 0.9rem;
+}
+.completion-stayopen:hover,
+.completion-quitnow:hover { background: rgba(255, 255, 255, 0.32); }
+
+.completion-summary-btn {
+    background: rgba(255, 255, 255, 0.18);
+    color: white;
+    border: 1px solid rgba(255, 255, 255, 0.55);
+    border-radius: 4px;
+    padding: 0.5rem 0.95rem;
+    font-weight: 600;
+    text-decoration: none;
+    font-size: 0.95rem;
+    transition: background 120ms ease;
+}
+.completion-summary-btn:hover { background: rgba(255, 255, 255, 0.32); }
+
+.completion-close {
+    background: transparent;
+    color: white;
+    border: 1px solid rgba(255, 255, 255, 0.45);
+    width: 2rem;
+    height: 2rem;
+    border-radius: 50%;
+    padding: 0;
+    font-size: 1.1rem;
+    line-height: 1;
+    cursor: pointer;
+}
+.completion-close:hover { background: rgba(255, 255, 255, 0.18); }
+
+@keyframes completion-slide-in {
+    from { transform: translateY(-110%); opacity: 0; }
+    to   { transform: translateY(0);     opacity: 1; }
+}
+@keyframes completion-pulse {
+    0%, 100% { box-shadow: 0 4px 16px rgba(0, 0, 0, 0.18); }
+    50%      { box-shadow: 0 4px 26px rgba(46, 125, 50, 0.55), 0 0 0 6px rgba(255, 255, 255, 0.08) inset; }
+}
+
+/* Push page content down while banner is visible so it doesn't overlap dashboard heading */
+body.has-completion-banner { padding-top: 5.25rem; }
 
 /* ── footer ────────────────────────────────────────────────────────────── */
 

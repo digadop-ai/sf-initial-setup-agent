@@ -42,14 +42,14 @@
         </fieldset>
 
         <label>
-            <span>Project parent directory</span>
+            <span>Project directory</span>
             <div class="row">
-                <input type="text" name="project_parent_dir" id="project_parent_dir" required
-                       value="{{ config.project_parent_dir or '' }}"
-                       placeholder="/Users/you/projects">
+                <input type="text" name="project_dir" id="project_dir" required
+                       value="{{ config.project_dir or '' }}"
+                       placeholder="/Users/you/projects/myorg-metadata">
                 <button type="button" id="pick-folder">Pick…</button>
             </div>
-            <small class="hint">SFDX project will live at <code>&lt;parent&gt;/&lt;alias&gt;-metadata/</code>.</small>
+            <small class="hint">The SFDX project (<code>sfdx-project.json</code>, <code>force-app/</code>, <code>manifest/</code>) is scaffolded directly here. Pick an empty folder, or one that already holds a previous retrieve for this org.</small>
         </label>
 
         <fieldset>
@@ -177,7 +177,7 @@ document.getElementById('pick-folder').addEventListener('click', async () => {
             return;
         }
         const data = await res.json();
-        document.getElementById('project_parent_dir').value = data.path;
+        document.getElementById('project_dir').value = data.path;
     } catch (e) {
         alert('Folder picker failed: ' + e);
     }
