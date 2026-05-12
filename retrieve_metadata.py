@@ -291,6 +291,13 @@ class OrgEnumeration:
     folders: list[dict] = field(default_factory=list)
     installed_packages: list[dict] = field(default_factory=list)
     package_licenses: list[dict] = field(default_factory=list)
+    # Per-member metadata captured during enumeration: maps (type, fullName) →
+    # {"lastModifiedDate": str | None, "namespacePrefix": str | None}.
+    # Powers retrieve-items.json delta-detection. Members enumerated via
+    # `sf org list metadata` come with `lastModifiedDate` for free; folder-based
+    # types (Report/Dashboard/EmailTemplate/Document) populate this via
+    # SystemModstamp on the SOQL query.
+    member_metadata: dict[tuple[str, str], dict] = field(default_factory=dict)
 
 
 def enumerate_folders(alias: str, include_managed: bool) -> list[dict]:
@@ -311,6 +318,7 @@ def enumerate_folder_items(
     alias: str,
     folders: list[dict],
     include_managed: bool,
+    member_metadata: Optional[dict] = None,
 ) -> dict[str, list[tuple[str, str]]]:
     """Enumerate individual reports / dashboards / email templates / documents.
 
@@ -320,9 +328,14 @@ def enumerate_folder_items(
     include_managed is False) are dropped — they aren't deployable as metadata
     via package.xml anyway.
 
-    Why this is needed: the Metadata API rejects `<members>FolderName/*</members>`
-    wildcard entries for folder-based types with "Entity not found". Each item
-    must be listed explicitly as `<members>FolderDevName/ItemDevName</members>`.
+    If `member_metadata` is provided, populates it with the SystemModstamp +
+    namespacePrefix per item so retrieve-items.json can later report when each
+    item last changed in Salesforce.
+
+    Why per-item enumeration is needed: the Metadata API rejects
+    `<members>FolderName/*</members>` wildcard entries for folder-based types
+    with "Entity not found". Each item must be listed explicitly as
+    `<members>FolderDevName/ItemDevName</members>`.
     """
     # Build lookup maps from the folder enumeration.
     folder_id_to_dev: dict[str, str] = {}
@@ -338,58 +351,67 @@ def enumerate_folder_items(
 
     out: dict[str, list[tuple[str, str]]] = {t: [] for t in FOLDER_BASED_METADATA_TYPES}
 
+    def _record(meta_type: str, folder_dev: str, item_dev: str, row: dict) -> None:
+        out[meta_type].append((folder_dev, item_dev))
+        if member_metadata is not None:
+            full_name = f"{folder_dev}/{item_dev}"
+            member_metadata[(meta_type, full_name)] = {
+                "lastModifiedDate": row.get("SystemModstamp") or row.get("LastModifiedDate"),
+                "namespacePrefix": row.get("NamespacePrefix") or None,
+            }
+
     # Report: FolderName is the folder's display Name (with spaces); look it
     # up in folder_name_to_dev to get the package.xml-friendly DeveloperName.
     for r in sf_query(
         alias,
-        "SELECT DeveloperName, FolderName, NamespacePrefix FROM Report "
-        "WHERE DeveloperName != null",
+        "SELECT DeveloperName, FolderName, NamespacePrefix, SystemModstamp "
+        "FROM Report WHERE DeveloperName != null",
     ):
         if r.get("NamespacePrefix") and not include_managed:
             continue
         folder_dev = folder_name_to_dev.get(r.get("FolderName"))
         if not folder_dev:
             continue
-        out["Report"].append((folder_dev, r["DeveloperName"]))
+        _record("Report", folder_dev, r["DeveloperName"], r)
 
     # Dashboard: same FolderName (display Name) pattern as Report.
     for r in sf_query(
         alias,
-        "SELECT DeveloperName, FolderName, NamespacePrefix FROM Dashboard "
-        "WHERE DeveloperName != null",
+        "SELECT DeveloperName, FolderName, NamespacePrefix, SystemModstamp "
+        "FROM Dashboard WHERE DeveloperName != null",
     ):
         if r.get("NamespacePrefix") and not include_managed:
             continue
         folder_dev = folder_name_to_dev.get(r.get("FolderName"))
         if not folder_dev:
             continue
-        out["Dashboard"].append((folder_dev, r["DeveloperName"]))
+        _record("Dashboard", folder_dev, r["DeveloperName"], r)
 
     # EmailTemplate: has FolderId; resolve through folder_id_to_dev.
     for r in sf_query(
         alias,
-        "SELECT DeveloperName, FolderId, NamespacePrefix FROM EmailTemplate "
-        "WHERE DeveloperName != null",
+        "SELECT DeveloperName, FolderId, NamespacePrefix, SystemModstamp "
+        "FROM EmailTemplate WHERE DeveloperName != null",
     ):
         if r.get("NamespacePrefix") and not include_managed:
             continue
         folder_dev = folder_id_to_dev.get(r.get("FolderId"))
         if not folder_dev:
             continue
-        out["EmailTemplate"].append((folder_dev, r["DeveloperName"]))
+        _record("EmailTemplate", folder_dev, r["DeveloperName"], r)
 
     # Document: has FolderId; resolve through folder_id_to_dev.
     for r in sf_query(
         alias,
-        "SELECT DeveloperName, FolderId, NamespacePrefix FROM Document "
-        "WHERE DeveloperName != null",
+        "SELECT DeveloperName, FolderId, NamespacePrefix, SystemModstamp "
+        "FROM Document WHERE DeveloperName != null",
     ):
         if r.get("NamespacePrefix") and not include_managed:
             continue
         folder_dev = folder_id_to_dev.get(r.get("FolderId"))
         if not folder_dev:
             continue
-        out["Document"].append((folder_dev, r["DeveloperName"]))
+        _record("Document", folder_dev, r["DeveloperName"], r)
 
     return out
 
@@ -438,9 +460,11 @@ def enumerate_org(
         and not (t == "InstalledPackage" and not include_managed)
     ]
 
-    def _enum_one(t: str) -> tuple[str, list[str]]:
+    def _enum_one(t: str) -> tuple[str, list[str], dict[str, dict]]:
+        """Returns (type_name, sorted_member_names, per_member_metadata_dict)."""
         members = list_metadata_members(alias, t)
         names: list[str] = []
+        per_member: dict[str, dict] = {}
         for m in members:
             full = m.get("fullName")
             if not full:
@@ -449,16 +473,22 @@ def enumerate_org(
             if ns and not include_managed:
                 continue
             names.append(full)
-        return t, sorted(set(names)) if names else []
+            per_member[full] = {
+                "lastModifiedDate": m.get("lastModifiedDate"),
+                "namespacePrefix": ns or None,
+            }
+        return t, sorted(set(names)) if names else [], per_member
 
     total = len(types_to_enumerate)
     completed = 0
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
         futures = [pool.submit(_enum_one, t) for t in types_to_enumerate]
         for fut in concurrent.futures.as_completed(futures):
-            t, names = fut.result()
+            t, names, per_member = fut.result()
             if names:
                 org.members_by_type[t] = names
+                for full, meta in per_member.items():
+                    org.member_metadata[(t, full)] = meta
             completed += 1
             if completed % 10 == 0 or completed == total:
                 emit("enumerate_progress", completed=completed, total=total)
@@ -481,9 +511,11 @@ def enumerate_org(
         with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
             futures = [pool.submit(_enum_one, t) for t in supplemental_to_try]
             for fut in concurrent.futures.as_completed(futures):
-                t, names = fut.result()
+                t, names, per_member = fut.result()
                 if names:
                     org.members_by_type[t] = names
+                    for full, meta in per_member.items():
+                        org.member_metadata[(t, full)] = meta
                     found += 1
                 completed += 1
                 if completed % 10 == 0 or completed == total_supp:
@@ -494,7 +526,10 @@ def enumerate_org(
          types_with_members=found)
 
     org.folders = enumerate_folders(alias, include_managed)
-    folder_items = enumerate_folder_items(alias, org.folders, include_managed)
+    folder_items = enumerate_folder_items(
+        alias, org.folders, include_managed,
+        member_metadata=org.member_metadata,
+    )
     emit("folder_items_enumerated",
          counts={t: len(v) for t, v in folder_items.items()})
     folder_members_by_type = _folder_members(org.folders, folder_items)
@@ -582,6 +617,223 @@ def filter_members(
     return out
 
 
+# ── Known rejections: pre-emptive filtering ────────────────────────────────────
+#
+# Some enumerated metadata members are known not to be retrievable via
+# `sf project retrieve start`, even though `sf org list metadata` happily reports
+# them. These produce predictable warnings in retrieve-summary.json on every run.
+# We filter them at enumerate time so the manifests don't include them and the
+# warning surface stays focused on novel issues. Filtered members are recorded
+# to `<project>/manifest/known-rejections.json` so the audit trail isn't lost.
+
+# Standard value sets that the Metadata API never retrieves regardless of
+# feature state. Configured via Setup → Data, not Metadata API.
+ALWAYS_INACCESSIBLE_STANDARD_VALUE_SETS = {
+    "AddressStateCode",
+    "AddressCountryCode",
+}
+
+# Standard value sets retrievable only when the parent feature is enabled.
+# Map value-set fullName → sObject whose existence proxies the feature flag.
+FEATURE_GATED_STANDARD_VALUE_SETS = {
+    "IdeaCategory1": "Idea",
+    "IdeaMultiCategory": "Idea",
+    "IdeaStatus": "Idea",
+    "IdeaThemeStatus": "IdeaTheme",
+    "QuestionOrigin1": "Question",
+    "QuoteStatus": "Quote",
+    "InvoiceStatus": "Invoice",
+    "WorkOrderStatus": "WorkOrder",
+    "WorkOrderPriority": "WorkOrder",
+    "WorkOrderLineItemStatus": "WorkOrderLineItem",
+}
+
+# AppMenu members SF enumerates but won't serialize.
+NON_RETRIEVABLE_APPMENU_MEMBERS = {"AppSwitcher"}
+
+# Suffix that identifies SF-internal virtual platform-event channels which
+# refuse retrieval ("Retrieve not allowed on channel X").
+VIRTUAL_PLATFORM_EVENT_CHANNEL_SUFFIX = "VirtualChannel"
+
+
+def list_available_sobjects(alias: str) -> set[str]:
+    """Return the set of sObject names exposed in the org.
+
+    Used by the feature-gated StandardValueSet filter — if `Idea` isn't a
+    queryable sObject in this org, the Ideas feature is off and the
+    `IdeaCategory1` standardValueSet isn't deployable.
+    """
+    try:
+        result = sf_json(["sobject", "list", "--target-org", alias])
+    except SfError:
+        return set()
+    if isinstance(result, list):
+        return {n for n in result if isinstance(n, str)}
+    items = result.get("result") or result.get("sobjects") or []
+    return {n for n in items if isinstance(n, str)}
+
+
+def apply_known_rejection_filters(
+    members_by_type: dict[str, list[str]],
+    available_sobjects: set[str],
+) -> tuple[dict[str, list[str]], list[dict]]:
+    """Pre-emptively drop enumerated members that Salesforce will reject on retrieve.
+
+    Returns (filtered_members_by_type, rejections_log) where rejections_log is a
+    list of {type, fullName, category, reason} dicts. The categories match
+    `_WARNING_PATTERNS` so the audit log groups cleanly with chunk warnings.
+    """
+    filtered: dict[str, list[str]] = {}
+    rejections: list[dict] = []
+
+    custom_object_members: set[str] = set(members_by_type.get("CustomObject", []))
+
+    for type_name, members in members_by_type.items():
+        kept: list[str] = []
+        for m in members:
+            drop_reason: Optional[tuple[str, str]] = None  # (category, human reason)
+
+            if type_name == "ListView":
+                # ListView fullName format: '<ParentObject>.<ViewName>'.
+                parent = m.split(".", 1)[0] if "." in m else m
+                if parent and parent not in custom_object_members:
+                    drop_reason = (
+                        "entity_not_found",
+                        f"parent SObject '{parent}' is SF-internal (not in CustomObject enumeration)",
+                    )
+
+            elif type_name == "AppMenu":
+                if m in NON_RETRIEVABLE_APPMENU_MEMBERS:
+                    drop_reason = (
+                        "name_form_invalid",
+                        "AppMenu standard nav node — SF refuses retrieve by name",
+                    )
+
+            elif type_name == "PlatformEventChannelMember":
+                # PEC member format: '<ChannelName>.<MemberName>'. Drop members
+                # whose channel name ends in 'VirtualChannel'.
+                channel = m.split(".", 1)[0] if "." in m else m
+                if channel.endswith(VIRTUAL_PLATFORM_EVENT_CHANNEL_SUFFIX):
+                    drop_reason = (
+                        "retrieve_not_allowed",
+                        f"channel '{channel}' is an SF-internal virtual channel",
+                    )
+
+            elif type_name == "StandardValueSet":
+                if m in ALWAYS_INACCESSIBLE_STANDARD_VALUE_SETS:
+                    drop_reason = (
+                        "name_form_invalid",
+                        "configured via Setup UI, not Metadata API",
+                    )
+                else:
+                    feature_sobject = FEATURE_GATED_STANDARD_VALUE_SETS.get(m)
+                    if feature_sobject and feature_sobject not in available_sobjects:
+                        drop_reason = (
+                            "entity_not_found",
+                            f"feature off (sObject '{feature_sobject}' not in org)",
+                        )
+
+            if drop_reason:
+                category, reason = drop_reason
+                rejections.append({
+                    "type": type_name,
+                    "fullName": m,
+                    "category": category,
+                    "reason": reason,
+                })
+            else:
+                kept.append(m)
+
+        if kept:
+            filtered[type_name] = kept
+
+    return filtered, rejections
+
+
+def write_known_rejections_log(
+    rejections: list[dict],
+    manifest_dir: Path,
+) -> Path:
+    """Write the known-rejections audit log to <project>/manifest/known-rejections.json."""
+    manifest_dir.mkdir(parents=True, exist_ok=True)
+    path = manifest_dir / "known-rejections.json"
+    payload = {
+        "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "count": len(rejections),
+        "rejections": rejections,
+    }
+    with path.open("w") as f:
+        json.dump(payload, f, indent=2)
+    return path
+
+
+def write_retrieve_items_log(
+    chunks: list["Chunk"],
+    results: list["ChunkResult"],
+    member_metadata: dict,
+    alias: str,
+    items_path: Path,
+) -> Path:
+    """Write per-item log to <project>/manifest/retrieve-items.json.
+
+    One row per attempted (type, fullName) pair:
+      - sf_last_modified: when the item last changed in Salesforce (from
+        `sf org list metadata` lastModifiedDate or SOQL SystemModstamp at
+        enumerate time). May be None for hardcoded members like StandardValueSet.
+      - retrieved_at: ISO timestamp when this member's chunk completed.
+      - success: True if the chunk succeeded AND this member wasn't in the
+        chunk's warning samples. False otherwise.
+      - warning_category: pattern category if this member was warned about.
+      - chunk_id, namespace_prefix: for filtering.
+
+    Future delta tools compare two runs' retrieve-items.json: any item whose
+    sf_last_modified increased without retrieved_at increasing is a stale
+    snapshot that needs re-retrieve.
+    """
+    # Map chunk_id → ChunkResult for fast lookup.
+    result_by_chunk: dict[str, "ChunkResult"] = {r.chunk_id: r for r in results}
+
+    # Build a set of (chunk_id, fullName) for warned members so we can mark
+    # them as success=False with the warning category attached.
+    warned: dict[tuple[str, str], str] = {}
+    for r in results:
+        for w in (r.warnings or []):
+            m = w.get("member")
+            if m:
+                warned[(r.chunk_id, m)] = w.get("category", "other")
+
+    items: list[dict] = []
+    for chunk in chunks:
+        r = result_by_chunk.get(chunk.chunk_id)
+        completed_at = r.completed_at if r else None
+        chunk_succeeded = bool(r and r.success)
+        for type_name, members in chunk.members_by_type.items():
+            for full_name in members:
+                meta = member_metadata.get((type_name, full_name), {}) or {}
+                wcat = warned.get((chunk.chunk_id, full_name))
+                items.append({
+                    "type": type_name,
+                    "fullName": full_name,
+                    "namespace_prefix": meta.get("namespacePrefix"),
+                    "sf_last_modified": meta.get("lastModifiedDate"),
+                    "retrieved_at": completed_at,
+                    "chunk_id": chunk.chunk_id,
+                    "success": chunk_succeeded and wcat is None,
+                    "warning_category": wcat,
+                })
+
+    items_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "alias": alias,
+        "count": len(items),
+        "items": items,
+    }
+    with items_path.open("w") as f:
+        json.dump(payload, f, indent=2)
+    return items_path
+
+
 # ── Manifest building & chunking ────────────────────────────────────────────────
 
 def read_api_version(directory: Path) -> str:
@@ -667,12 +919,22 @@ def build_chunks(
                 driver_subset[driver] = list(members)
         chunks.extend(_pack_profile_chunks(profiles, driver_subset, chunk_size))
 
-    # One chunk per remaining type (sub-chunked if oversized)
+    # One chunk per remaining type (sub-chunked if oversized). Bundle types
+    # split further by namespace when cross-namespace name collisions are
+    # present, so each chunk's manifest only contains one bundle of each
+    # DeveloperName — avoiding SF's "Duplicate object names in the same
+    # package" error.
     for type_name in sorted(members_by_type):
         members = members_by_type[type_name]
         if not members:
             continue
-        chunks.extend(_pack_type_chunks(type_name, members, chunk_size))
+        if (
+            type_name in NAMESPACE_AWARE_BUNDLE_TYPES
+            and _has_cross_namespace_name_collisions(members)
+        ):
+            chunks.extend(_pack_bundle_namespace_chunks(type_name, members, chunk_size))
+        else:
+            chunks.extend(_pack_type_chunks(type_name, members, chunk_size))
     return chunks
 
 
@@ -772,6 +1034,79 @@ def _safe_chunk_id(type_name: str) -> str:
     return safe or "Unknown"
 
 
+# Types where multiple namespaces can ship bundles with the same DeveloperName
+# (e.g., both an unmanaged `picklistOption` LWC and a managed-package
+# `MANAGED__picklistOption`). When that happens within a single chunk's
+# manifest, Salesforce returns "Duplicate object names in the same package,
+# 'aura/lightningOut/lightningOut.app'; please rename one" and writes only one
+# of them. Splitting these bundle types into per-namespace chunks avoids the
+# SF-side error. A separate disk-overwrite issue remains (the per-namespace
+# chunks all write to the same `aura/<bundleName>/` path on disk) — addressing
+# that requires per-namespace package directories in sfdx-project.json, which
+# is a v0.4.x change.
+NAMESPACE_AWARE_BUNDLE_TYPES = {"AuraDefinitionBundle", "LightningComponentBundle"}
+
+
+def _has_cross_namespace_name_collisions(members: list[str]) -> bool:
+    """Returns True if any DeveloperName appears under multiple namespace prefixes."""
+    seen: set[str] = set()
+    for m in members:
+        dev = m.split("__", 1)[1] if "__" in m else m
+        if dev in seen:
+            return True
+        seen.add(dev)
+    return False
+
+
+def _split_bundle_members_by_namespace(members: list[str]) -> dict[str, list[str]]:
+    """Group bundle members by namespace prefix. Unmanaged (no prefix) → key 'default'."""
+    by_ns: dict[str, list[str]] = {}
+    for m in members:
+        ns = m.split("__", 1)[0] if "__" in m else "default"
+        by_ns.setdefault(ns, []).append(m)
+    return by_ns
+
+
+def _pack_bundle_namespace_chunks(
+    type_name: str,
+    members: list[str],
+    chunk_size: int,
+) -> list[Chunk]:
+    """One chunk per namespace, sub-chunked further if a single namespace has > chunk_size."""
+    by_ns = _split_bundle_members_by_namespace(members)
+    parts: list[Chunk] = []
+    safe_type = _safe_chunk_id(type_name)
+    for ns in sorted(by_ns):
+        ns_members = sorted(set(by_ns[ns]))
+        n = len(ns_members)
+        if n == 0:
+            continue
+        if n <= chunk_size:
+            parts.append(Chunk(
+                chunk_id=f"{safe_type}.{ns}",
+                members_by_type={type_name: ns_members},
+                member_count=n,
+                type_label=f"{type_name} [{ns} namespace] ({n:,} members)",
+                primary_type=type_name,
+            ))
+            continue
+        sub_total = (n + chunk_size - 1) // chunk_size
+        for i in range(sub_total):
+            sub = ns_members[i * chunk_size : (i + 1) * chunk_size]
+            sub_index = i + 1
+            parts.append(Chunk(
+                chunk_id=f"{safe_type}.{ns}.{sub_index}",
+                members_by_type={type_name: sub},
+                member_count=len(sub),
+                type_label=f"{type_name} [{ns} namespace] part {sub_index}/{sub_total} "
+                           f"({len(sub):,} members)",
+                primary_type=type_name,
+                sub_index=sub_index,
+                sub_total=sub_total,
+            ))
+    return parts
+
+
 # ── Parallel retrieve ───────────────────────────────────────────────────────────
 
 @dataclass
@@ -789,6 +1124,10 @@ class ChunkResult:
     sub_total: int = 0
     members_attempted: int = 0
     warnings: list[dict] = field(default_factory=list)
+    # ISO-8601 UTC timestamp set when the chunk's retrieve completes (success or
+    # failure). Used by retrieve-items.json to record per-member retrieved_at —
+    # all members in a chunk share the chunk's completion time.
+    completed_at: Optional[str] = None
 
 
 # Known patterns in `result.messages` from `sf project retrieve start`. Each
@@ -809,6 +1148,22 @@ _WARNING_PATTERNS: list[tuple[str, str]] = [
     ("not accessible", "not_accessible"),
     # API version mismatch on a specific member.
     ("not available in version", "api_version_mismatch"),
+    # Member name format the Metadata API refuses (e.g., AppMenu 'AppSwitcher'
+    # enumerated by list-metadata but rejected on retrieve with this exact
+    # phrasing; NetworkBranding 'cbStony_Point_Inc' similarly — the `cb*` prefix
+    # is SF's internal Customer Branding key, not the retrieve-by-name form).
+    ("improper input", "name_form_invalid"),
+    # Cross-namespace name collision: two bundles (managed-package + unmanaged,
+    # or two managed-package versions) share a name like `lightningOut.app` or
+    # `picklistOption`. sf retrieve unpacks one bundle into the target folder and
+    # the others fail with this. Bundles still get retrieved (one of them), but
+    # the duplicates are dropped from disk. Not a recoverable rejection — it's a
+    # filesystem-layout limitation of source format, not a metadata API one.
+    ("duplicate object names", "name_collision"),
+    # PlatformEventChannelMember on SF-internal virtual channels (e.g.,
+    # ActivityEngagementVirtualChannel) — exists at the API level but the
+    # platform refuses to serialize them. No retrieval path.
+    ("retrieve not allowed", "retrieve_not_allowed"),
 ]
 
 
@@ -981,6 +1336,7 @@ def retrieve_one(
                 sub_total=chunk.sub_total,
                 members_attempted=chunk.member_count,
                 warnings=warnings,
+                completed_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
             )
         err = (proc.stderr or proc.stdout or "").strip().splitlines()[-1:]
         err_msg = err[0] if err else f"exit {proc.returncode}"
@@ -999,6 +1355,7 @@ def retrieve_one(
             sub_index=chunk.sub_index,
             sub_total=chunk.sub_total,
             members_attempted=chunk.member_count,
+            completed_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
         )
     except subprocess.TimeoutExpired:
         elapsed = time.time() - started_at
@@ -1016,6 +1373,7 @@ def retrieve_one(
             sub_index=chunk.sub_index,
             sub_total=chunk.sub_total,
             members_attempted=chunk.member_count,
+            completed_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
         )
     finally:
         stop.set()
@@ -1247,6 +1605,26 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     members = filter_members(org.members_by_type, excluded_namespaces)
 
+    # Pre-emptively filter members known to fail retrieve (SF-internal virtual
+    # entities, AppMenu standard nodes, feature-gated StandardValueSets, etc.).
+    # Audit log written to manifest/known-rejections.json — they still appear
+    # in the snapshot, just not in the manifest or chunk warnings.
+    available_sobjects = list_available_sobjects(args.alias)
+    members, rejections = apply_known_rejection_filters(members, available_sobjects)
+    if rejections:
+        manifest_dir.mkdir(parents=True, exist_ok=True)
+        log_path = write_known_rejections_log(rejections, manifest_dir)
+        by_category: dict[str, int] = {}
+        by_type: dict[str, int] = {}
+        for r in rejections:
+            by_category[r["category"]] = by_category.get(r["category"], 0) + 1
+            by_type[r["type"]] = by_type.get(r["type"], 0) + 1
+        emit("known_rejections_filtered",
+             count=len(rejections),
+             by_category=by_category,
+             by_type=by_type,
+             log_path=str(log_path))
+
     chunks = build_chunks(members, args.chunk_size)
     for c in chunks:
         c.manifest_path = manifest_dir / f"{c.chunk_id}.xml"
@@ -1266,6 +1644,19 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     summary_path = manifest_dir / "retrieve-summary.json"
     write_summary(results, summary_path)
+
+    # Per-item log with sf_last_modified + retrieved_at for future delta tools.
+    items_path = manifest_dir / "retrieve-items.json"
+    write_retrieve_items_log(
+        chunks=chunks,
+        results=results,
+        member_metadata=org.member_metadata,
+        alias=args.alias,
+        items_path=items_path,
+    )
+    emit("retrieve_items_written", path=str(items_path), count=sum(
+        len(members) for c in chunks for members in c.members_by_type.values()
+    ))
 
     succeeded = sum(1 for r in results if r.success)
     failed = sum(1 for r in results if not r.success)
