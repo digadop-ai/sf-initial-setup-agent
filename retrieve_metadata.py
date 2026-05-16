@@ -932,6 +932,14 @@ def build_chunks(
                 driver_subset[driver] = list(members)
         chunks.extend(_pack_profile_chunks(profiles, driver_subset, chunk_size))
 
+    # ExperienceBundle: one retrieve per bundle, no batching. Packing >1
+    # bundle in a single retrieve has been observed to silently drop bundles
+    # from result.fileProperties (issue #1). Bundles are also large enough
+    # individually that batching doesn't save round-trips.
+    bundles = members_by_type.pop("ExperienceBundle", [])
+    if bundles:
+        chunks.extend(_pack_experience_bundle_chunks(bundles))
+
     # One chunk per remaining type (sub-chunked if oversized). Bundle types
     # split further by namespace when cross-namespace name collisions are
     # present, so each chunk's manifest only contains one bundle of each
@@ -949,6 +957,25 @@ def build_chunks(
         else:
             chunks.extend(_pack_type_chunks(type_name, members, chunk_size))
     return chunks
+
+
+def _pack_experience_bundle_chunks(members: list[str]) -> list[Chunk]:
+    """One chunk per ExperienceBundle member. See issue #1."""
+    members = sorted(set(members))
+    sub_total = len(members)
+    parts: list[Chunk] = []
+    for i, name in enumerate(members, start=1):
+        safe = _safe_chunk_id(f"ExperienceBundle.{name}")
+        parts.append(Chunk(
+            chunk_id=safe,
+            members_by_type={"ExperienceBundle": [name]},
+            member_count=1,
+            type_label=f"ExperienceBundle {name} ({i}/{sub_total})",
+            primary_type="ExperienceBundle",
+            sub_index=i,
+            sub_total=sub_total,
+        ))
+    return parts
 
 
 def _pack_type_chunks(
@@ -1218,6 +1245,52 @@ def _extract_warnings(result_obj: dict) -> list[dict]:
     return out
 
 
+def _present_top_level_members(files: list[dict]) -> set[tuple[str, str]]:
+    """Top-level (type, fullName) pairs from a retrieve's result.files entries.
+
+    Bundle and folder types return constituent files with slash-bearing
+    fullNames (e.g., 'Gulf_360_Portal1/routes/home.json'); only the prefix
+    before the first '/' is the top-level manifest member. The package.xml
+    entry is filtered out.
+    """
+    present: set[tuple[str, str]] = set()
+    for f in files or []:
+        t = (f.get("type") or "").strip()
+        name = (f.get("fullName") or "").strip()
+        if not t or not name:
+            continue
+        if t == "Package" or name == "package.xml":
+            continue
+        top = name.split("/", 1)[0]
+        present.add((t, top))
+    return present
+
+
+def _silently_missing_members(
+    chunk: "Chunk",
+    files: list[dict],
+    warnings: list[dict],
+) -> list[tuple[str, str]]:
+    """Manifest members absent from result.files with no explanatory warning.
+
+    SF sometimes returns exit 0 with a partial result.files set and no entry
+    in result.messages — most notably for ExperienceBundle when multiple
+    bundles share a retrieve. Anything missing from result.files AND not
+    named in a warning's `member` field is treated as silently dropped.
+    """
+    present = _present_top_level_members(files)
+    explained: set[str] = {w["member"] for w in warnings if w.get("member")}
+    missing: list[tuple[str, str]] = []
+    for type_name, members in chunk.members_by_type.items():
+        for m in members:
+            if (type_name, m) in present:
+                continue
+            if m in explained:
+                continue
+            missing.append((type_name, m))
+    return missing
+
+
 def _watch_chunk(chunk_id: str, started_at: float, stop: threading.Event) -> None:
     """Emit periodic chunk_progress events while the chunk runs."""
     while not stop.wait(PROGRESS_INTERVAL_SECONDS):
@@ -1278,16 +1351,37 @@ def retrieve_one(
 
         files_retrieved = 0
         warnings: list[dict] = []
+        result_files: list[dict] = []
         try:
             data = json.loads(proc.stdout) if proc.stdout.strip() else {}
             result_obj = data.get("result", {}) or {}
-            files = result_obj.get("files", [])
-            files_retrieved = len(files)
+            result_files = result_obj.get("files", []) or []
+            files_retrieved = len(result_files)
             warnings = _extract_warnings(result_obj)
         except json.JSONDecodeError:
             pass
 
+        # Hard-fail check: if SF returned exit 0 but some manifest members
+        # are absent from result.files AND no warning explains them, treat
+        # the chunk as failed so the existing retry-alone path picks it up.
+        # See issue #1 — ExperienceBundle silently drops members when
+        # multiple bundles share a retrieve.
+        silently_missing: list[tuple[str, str]] = []
         if proc.returncode == 0:
+            silently_missing = _silently_missing_members(chunk, result_files, warnings)
+            if silently_missing:
+                for t, m in silently_missing:
+                    warnings.append({
+                        "category": "missing_from_result",
+                        "file_name": "",
+                        "problem": (
+                            f"Manifest member '{m}' (type {t}) absent from result.files "
+                            "with no explanatory message — likely silently dropped by SF."
+                        ),
+                        "member": m,
+                    })
+
+        if proc.returncode == 0 and not silently_missing:
             # Bucket warnings by category for the chunk_done payload.
             warn_counts: dict[str, int] = {}
             for w in warnings:
@@ -1351,8 +1445,17 @@ def retrieve_one(
                 warnings=warnings,
                 completed_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
             )
-        err = (proc.stderr or proc.stdout or "").strip().splitlines()[-1:]
-        err_msg = err[0] if err else f"exit {proc.returncode}"
+        if silently_missing:
+            missing_names = [m for _, m in silently_missing]
+            sample = ", ".join(missing_names[:5])
+            more = f" (+{len(missing_names) - 5} more)" if len(missing_names) > 5 else ""
+            err_msg = (
+                f"silently dropped {len(missing_names)} manifest member(s): "
+                f"{sample}{more}"
+            )
+        else:
+            err = (proc.stderr or proc.stdout or "").strip().splitlines()[-1:]
+            err_msg = err[0] if err else f"exit {proc.returncode}"
         emit("chunk_failed",
              chunk_id=chunk.chunk_id,
              type_label=chunk.type_label,
@@ -1362,12 +1465,14 @@ def retrieve_one(
              log_path=str(log_path))
         return ChunkResult(
             chunk_id=chunk.chunk_id, success=False,
+            files_retrieved=files_retrieved if silently_missing else 0,
             elapsed_s=elapsed, log_path=log_path, error=err_msg,
             type_label=chunk.type_label,
             primary_type=chunk.primary_type,
             sub_index=chunk.sub_index,
             sub_total=chunk.sub_total,
             members_attempted=chunk.member_count,
+            warnings=warnings,
             completed_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
         )
     except subprocess.TimeoutExpired:

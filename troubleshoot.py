@@ -400,10 +400,23 @@ def build_user_brief(summary: dict, project_dir: Path) -> str:
         "",
     ]
     for c in failed:
-        lines.append(f"- **{c['chunk_id']}** — {c.get('error') or 'no error message captured'}")
+        label = c.get("type_label") or c.get("primary_type") or ""
+        header = f"- **{c['chunk_id']}**"
+        if label:
+            header += f" — {label}"
+        header += f" — {c.get('error') or 'no error message captured'}"
+        lines.append(header)
         lines.append(f"  - log: `{c.get('log_path') or 'n/a'}`")
+        lines.append(f"  - members attempted: {c.get('members_attempted', 0)}")
         lines.append(f"  - elapsed: {c.get('elapsed_s', 0)}s")
         lines.append(f"  - already retried: {c.get('retried', False)}")
+        warnings = c.get("warnings") or []
+        if warnings:
+            cats: dict[str, int] = {}
+            for w in warnings:
+                cats[w.get("category", "other")] = cats.get(w.get("category", "other"), 0) + 1
+            cat_str = ", ".join(f"{k}={v}" for k, v in sorted(cats.items()))
+            lines.append(f"  - warnings: {cat_str}")
     lines += [
         "",
         "## Your job",
