@@ -66,6 +66,18 @@ FOLDER_TYPE_TO_METADATA_TYPE = {
 # Types whose members are enumerated via SOQL on Folder, not `sf org list metadata`.
 FOLDER_BASED_METADATA_TYPES = set(FOLDER_TYPE_TO_METADATA_TYPE.values())
 
+# Per-type, the name SF uses in `result.files` to identify folder members
+# (different from `<Type>Folder` for EmailTemplate). Manifest spec'd under
+# `<name>Type</name>` but fileProperties surfaces the folder entries under
+# `type=<FolderTypeName>`. Unmapped types default to `<Type>Folder`.
+METADATA_TYPE_TO_FOLDER_FILEPROP_TYPE = {
+    "EmailTemplate": "EmailFolder",
+    # Confirmed identical for these (sanity / explicitness):
+    "Dashboard": "DashboardFolder",
+    "Report": "ReportFolder",
+    "Document": "DocumentFolder",
+}
+
 # Profile retrieve fidelity depends on these types being in the same package.xml.
 PROFILE_SHAPE_DRIVERS = [
     "CustomObject",
@@ -656,6 +668,16 @@ FEATURE_GATED_STANDARD_VALUE_SETS = {
 # AppMenu members SF enumerates but won't serialize.
 NON_RETRIEVABLE_APPMENU_MEMBERS = {"AppSwitcher"}
 
+# Folder-based types where `sf org list metadata` emits the SF-internal
+# placeholder folder name `unfiled$public`. This isn't a real Folder record
+# in the org's Folder table — it's the bucket for personal/orphan reports
+# and email templates. The Metadata API won't retrieve it as a folder, so
+# it gets pre-filtered. Items WITHIN unfiled$public can still be retrieved
+# individually (their fullName is `unfiled$public/<TemplateName>`), so we
+# only filter the bare `unfiled$public` folder member, not the items.
+UNFILED_PUBLIC_FOLDER_NAME = "unfiled$public"
+FOLDER_TYPES_WITH_UNFILED_PUBLIC = {"Report", "EmailTemplate"}
+
 # Suffix that identifies SF-internal virtual platform-event channels which
 # refuse retrieval ("Retrieve not allowed on channel X").
 VIRTUAL_PLATFORM_EVENT_CHANNEL_SUFFIX = "VirtualChannel"
@@ -731,6 +753,15 @@ def apply_known_rejection_filters(
                         "retrieve_not_allowed",
                         f"channel '{channel}' is an SF-internal virtual channel",
                     )
+
+            elif (
+                type_name in FOLDER_TYPES_WITH_UNFILED_PUBLIC
+                and m == UNFILED_PUBLIC_FOLDER_NAME
+            ):
+                drop_reason = (
+                    "name_form_invalid",
+                    "'unfiled$public' is a SF placeholder folder, not retrievable as metadata",
+                )
 
             elif type_name == "StandardValueSet":
                 if m in ALWAYS_INACCESSIBLE_STANDARD_VALUE_SETS:
@@ -1242,6 +1273,25 @@ def _extract_warnings(result_obj: dict) -> list[dict]:
             parts = problem.split("'")
             if len(parts) >= 4:
                 member = parts[3]
+        # Some "improper input" / "metadata from db failed" messages don't
+        # quote the name — they use the form:
+        #   "... file name:Folder/Item." (sentence period at end)
+        # Catch that pattern too.
+        if member is None and "file name:" in problem:
+            tail = problem.split("file name:", 1)[1].strip()
+            # The member runs from here to end-of-message; strip a trailing
+            # sentence period if present.
+            if tail.endswith("."):
+                tail = tail[:-1]
+            tail = tail.strip()
+            if tail:
+                member = tail
+        # SF sometimes quotes folder members with a trailing slash to
+        # disambiguate folder-vs-item form (e.g., 'Conga_Reports/' for the
+        # folder, 'Conga_Reports/Foo' for an item). Manifests don't carry
+        # the trailing slash, so normalize.
+        if member is not None and member.endswith("/"):
+            member = member.rstrip("/")
         out.append({
             "category": _classify_message(problem),
             "file_name": file_name,
@@ -1338,7 +1388,9 @@ def _silently_missing_members(
     explained: set[str] = {w["member"] for w in warnings if w.get("member")}
     missing: list[tuple[str, str]] = []
     for type_name, members in chunk.members_by_type.items():
-        folder_type = type_name + "Folder"
+        folder_type = METADATA_TYPE_TO_FOLDER_FILEPROP_TYPE.get(
+            type_name, type_name + "Folder"
+        )
         names_for_type = names_by_type.get(type_name, [])
         names_for_folder = names_by_type.get(folder_type, [])
         for m in members:
