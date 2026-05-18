@@ -349,17 +349,16 @@ def enumerate_folder_items(
     with "Entity not found". Each item must be listed explicitly as
     `<members>FolderDevName/ItemDevName</members>`.
     """
-    # Build lookup maps from the folder enumeration.
+    # Build lookup map from the folder enumeration. We resolve every
+    # folder-based type by FolderId/OwnerId (which references Folder by
+    # Id), never by FolderName — Folder.Name is a display label that can
+    # collide across distinct DeveloperNames.
     folder_id_to_dev: dict[str, str] = {}
-    folder_name_to_dev: dict[str, str] = {}
     for f in folders:
         dev = f.get("DeveloperName")
-        if not dev:
+        if not dev or not f.get("Id"):
             continue
-        if f.get("Id"):
-            folder_id_to_dev[f["Id"]] = dev
-        if f.get("Name"):
-            folder_name_to_dev[f["Name"]] = dev
+        folder_id_to_dev[f["Id"]] = dev
 
     out: dict[str, list[tuple[str, str]]] = {t: [] for t in FOLDER_BASED_METADATA_TYPES}
 
@@ -372,29 +371,36 @@ def enumerate_folder_items(
                 "namespacePrefix": row.get("NamespacePrefix") or None,
             }
 
-    # Report: FolderName is the folder's display Name (with spaces); look it
-    # up in folder_name_to_dev to get the package.xml-friendly DeveloperName.
+    # Report: resolve folder via OwnerId, NOT FolderName. Two different
+    # Folder records can share the same display Name (e.g., a 'Mystery_Shop'
+    # folder under one parent and a 'MysteryShop' folder under another both
+    # named "Mystery Shop"). Looking up by FolderName produces nondeterministic
+    # collisions in folder_name_to_dev. OwnerId references the Folder
+    # directly (or a User/Organization for personal reports — those don't
+    # belong in a public manifest and are filtered out).
     for r in sf_query(
         alias,
-        "SELECT DeveloperName, FolderName, NamespacePrefix, SystemModstamp "
+        "SELECT DeveloperName, OwnerId, NamespacePrefix, SystemModstamp "
         "FROM Report WHERE DeveloperName != null",
     ):
         if r.get("NamespacePrefix") and not include_managed:
             continue
-        folder_dev = folder_name_to_dev.get(r.get("FolderName"))
+        folder_dev = folder_id_to_dev.get(r.get("OwnerId"))
         if not folder_dev:
             continue
         _record("Report", folder_dev, r["DeveloperName"], r)
 
-    # Dashboard: same FolderName (display Name) pattern as Report.
+    # Dashboard: use FolderId for the same reason. (Dashboard.FolderId
+    # references Folder; Dashboard.OwnerId references User and is the
+    # personal-dashboard owner, not the folder.)
     for r in sf_query(
         alias,
-        "SELECT DeveloperName, FolderName, NamespacePrefix, SystemModstamp "
+        "SELECT DeveloperName, FolderId, NamespacePrefix, SystemModstamp "
         "FROM Dashboard WHERE DeveloperName != null",
     ):
         if r.get("NamespacePrefix") and not include_managed:
             continue
-        folder_dev = folder_name_to_dev.get(r.get("FolderName"))
+        folder_dev = folder_id_to_dev.get(r.get("FolderId"))
         if not folder_dev:
             continue
         _record("Dashboard", folder_dev, r["DeveloperName"], r)
@@ -1221,8 +1227,11 @@ _WARNING_PATTERNS: list[tuple[str, str]] = [
     ("not available in version", "api_version_mismatch"),
     # Member name format the Metadata API refuses (e.g., AppMenu 'AppSwitcher'
     # enumerated by list-metadata but rejected on retrieve with this exact
-    # phrasing; NetworkBranding 'cbStony_Point_Inc' similarly — the `cb*` prefix
-    # is SF's internal Customer Branding key, not the retrieve-by-name form).
+    # phrasing). Also fires for individual NetworkBranding members SF can't
+    # serialize (verified 2026-05-17 against ecuat: `cbGulf_360_Portal`
+    # retrieves fine while `cbGulf_Oil_Limited_Partnership` returns this
+    # error — the `cb` prefix is not universally rejected, only stale /
+    # orphaned cb-members are).
     ("improper input", "name_form_invalid"),
     # Cross-namespace name collision: two bundles (managed-package + unmanaged,
     # or two managed-package versions) share a name like `lightningOut.app` or
@@ -1386,6 +1395,16 @@ def _silently_missing_members(
     """
     exact, bundle_evidence, names_by_type = _present_member_index(files)
     explained: set[str] = {w["member"] for w in warnings if w.get("member")}
+    # Chunk-level messages: warnings the parser couldn't attribute to a
+    # specific member (no quotes, no `file name:X` form). These usually
+    # describe a failure mode that applies to the chunk as a whole, e.g.,
+    # "You do not have the proper permissions to access QuickAction" or
+    # "Cannot retrieve documents in a user's private folder." If a chunk
+    # has any unattributed warnings AND missing-from-fileProperties
+    # members, the messages effectively explain the missing members —
+    # we broadcast the explanation by treating all missing members as
+    # explained. Warnings stay surfaced so the operator sees them.
+    has_chunk_level_warning = any(not w.get("member") for w in warnings)
     missing: list[tuple[str, str]] = []
     for type_name, members in chunk.members_by_type.items():
         folder_type = METADATA_TYPE_TO_FOLDER_FILEPROP_TYPE.get(
@@ -1419,6 +1438,12 @@ def _silently_missing_members(
             # Also check explained set for path-suffix matches (a failed-
             # fileProperty with a long path explains a short-path manifest).
             if any(e.endswith(needle) for e in explained if e):
+                continue
+            # Last resort: a chunk-level warning (no specific member named)
+            # explains everything in the chunk that doesn't have its own
+            # attribution. This handles the QuickAction "no permissions"
+            # and Letterhead "private folder" cases.
+            if has_chunk_level_warning:
                 continue
             missing.append((type_name, m))
     return missing
