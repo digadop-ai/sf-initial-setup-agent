@@ -63,6 +63,7 @@
                         <th>Files</th>
                         <th>Elapsed (s)</th>
                         <th>Retried?</th>
+                        <th>Warnings</th>
                         <th>Log / error</th>
                     </tr>
                 </thead>
@@ -78,6 +79,24 @@
                         <td>{{ c.files_retrieved }}</td>
                         <td>{{ c.elapsed_s }}</td>
                         <td>{{ 'yes' if c.retried else '' }}</td>
+                        <td>
+                            {% if c.warnings %}
+                                <details class="warnings-detail">
+                                    <summary><strong>{{ c.warnings|length }}</strong> ⚠</summary>
+                                    <ul class="warnings-list">
+                                    {% for w in c.warnings %}
+                                        <li>
+                                            <span class="warning-category" title="{{ w.category }}">{{ w.category }}</span>
+                                            {% if w.member %}<code>{{ w.member }}</code>{% endif %}
+                                            {% if w.problem %}<div class="warning-problem">{{ w.problem }}</div>{% endif %}
+                                        </li>
+                                    {% endfor %}
+                                    </ul>
+                                </details>
+                            {% else %}
+                                —
+                            {% endif %}
+                        </td>
                         <td>
                             {% if c.error %}<span class="err">{{ c.error }}</span><br>{% endif %}
                             {% if c.log_path %}<small><code>{{ c.log_path }}</code></small>{% endif %}

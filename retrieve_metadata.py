@@ -674,6 +674,38 @@ FEATURE_GATED_STANDARD_VALUE_SETS = {
 # AppMenu members SF enumerates but won't serialize.
 NON_RETRIEVABLE_APPMENU_MEMBERS = {"AppSwitcher"}
 
+# Managed-package CustomMetadata records auto-generated to describe SF
+# system entities (Change Data Capture event, Feed, Share, MDT, External-
+# object). These are template records the package creates internally;
+# SF's Metadata API enumerates them in `sf org list metadata CustomMetadata`
+# but won't serialize them on retrieve — exit 0, no message, no file.
+# The naming pattern is consistent: `<NS>__<TypeName>.<NS>__<Suffix>`
+# where the same namespace appears on both sides AND the suffix is one
+# of these SF-internal entity reserved names. Verified 2026-05-18 against
+# ecuat for the `pnova__sObject_FilterExtension.pnova__{...}` family.
+CUSTOM_METADATA_SF_INTERNAL_RECORD_SUFFIXES = {
+    "ChangeEvent",
+    "Feed",
+    "Share",
+    "mdt",
+    "x",
+}
+
+
+def _is_sf_internal_custom_metadata_record(full_name: str) -> bool:
+    """True iff full_name matches `<NS>__<Type>.<NS>__<reserved-suffix>`."""
+    if "." not in full_name:
+        return False
+    type_part, record_part = full_name.split(".", 1)
+    if "__" not in type_part or "__" not in record_part:
+        return False
+    type_ns = type_part.split("__", 1)[0]
+    record_ns, _, record_dev = record_part.partition("__")
+    if type_ns != record_ns:
+        return False
+    return record_dev in CUSTOM_METADATA_SF_INTERNAL_RECORD_SUFFIXES
+
+
 # Folder-based types where `sf org list metadata` emits the SF-internal
 # placeholder folder name `unfiled$public`. This isn't a real Folder record
 # in the org's Folder table — it's the bucket for personal/orphan reports
@@ -759,6 +791,17 @@ def apply_known_rejection_filters(
                         "retrieve_not_allowed",
                         f"channel '{channel}' is an SF-internal virtual channel",
                     )
+
+            elif (
+                type_name == "CustomMetadata"
+                and _is_sf_internal_custom_metadata_record(m)
+            ):
+                drop_reason = (
+                    "name_form_invalid",
+                    "managed-package CustomMetadata record auto-generated for a "
+                    "SF-internal entity (ChangeEvent / Feed / Share / mdt / x) "
+                    "— not retrievable via Metadata API",
+                )
 
             elif (
                 type_name in FOLDER_TYPES_WITH_UNFILED_PUBLIC

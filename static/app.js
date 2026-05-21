@@ -269,12 +269,70 @@
             <td class="cmembers">—</td>
             <td class="cfiles">—</td>
             <td class="celapsed">0s</td>
+            <td class="cwarnings">—</td>
             <td class="cnotes"></td>
         `;
         tbody.appendChild(tr);
         rows.set(chunkId, tr);
         empty.style.display = 'none';
         return tr;
+    }
+
+    function renderWarnings(cell, count, byCategory, samples) {
+        // Build an expandable <details> block: summary shows the count + ⚠,
+        // expanded body lists category breakdown and per-warning samples
+        // (the chunk_warnings event includes up to 20 samples; rest are in
+        // the chunk log file).
+        cell.textContent = '';
+        if (!count || count <= 0) {
+            cell.textContent = '—';
+            return;
+        }
+        const details = document.createElement('details');
+        details.className = 'warnings-detail';
+        const summary = document.createElement('summary');
+        summary.innerHTML = `<strong>${count}</strong> ⚠`;
+        details.appendChild(summary);
+
+        if (byCategory && Object.keys(byCategory).length) {
+            const cats = document.createElement('div');
+            cats.className = 'warning-categories';
+            cats.textContent = Object.entries(byCategory)
+                .map(([cat, n]) => `${cat}: ${n}`).join(' · ');
+            details.appendChild(cats);
+        }
+        if (samples && samples.length) {
+            const list = document.createElement('ul');
+            list.className = 'warnings-list';
+            samples.forEach(w => {
+                const li = document.createElement('li');
+                const cat = document.createElement('span');
+                cat.className = 'warning-category';
+                cat.textContent = w.category || 'warning';
+                li.appendChild(cat);
+                if (w.member) {
+                    const mem = document.createElement('code');
+                    mem.textContent = w.member;
+                    li.appendChild(document.createTextNode(' '));
+                    li.appendChild(mem);
+                }
+                if (w.problem) {
+                    const p = document.createElement('div');
+                    p.className = 'warning-problem';
+                    p.textContent = w.problem;
+                    li.appendChild(p);
+                }
+                list.appendChild(li);
+            });
+            details.appendChild(list);
+            if (count > samples.length) {
+                const more = document.createElement('div');
+                more.className = 'warnings-more';
+                more.textContent = `+${count - samples.length} more — see retrieve-summary.json or the per-chunk log file.`;
+                details.appendChild(more);
+            }
+        }
+        cell.appendChild(details);
     }
 
     function updateChunk(event) {
@@ -317,6 +375,15 @@
             }
             tr.className = 'chunk-row state-failed';
             chunksFailedCount += 1;
+        } else if (event.event === 'chunk_warnings') {
+            // Populate the warnings cell with count + expandable detail.
+            // Triggered AFTER chunk_done for chunks that returned warnings,
+            // or AFTER chunk_failed for failed chunks whose silent-drop
+            // detection produced structured warnings.
+            const cell = tr.querySelector('.cwarnings');
+            if (cell) {
+                renderWarnings(cell, event.count || 0, event.by_category || {}, event.samples || []);
+            }
         }
     }
 
@@ -524,7 +591,8 @@
         logLine(event);
 
         if (e === 'chunk_started' || e === 'chunk_progress' ||
-            e === 'chunk_done' || e === 'chunk_failed') {
+            e === 'chunk_done' || e === 'chunk_failed' ||
+            e === 'chunk_warnings') {
             if (e === 'chunk_started' && !chunksStarted) {
                 chunksStarted = true;
                 setSetupStatus(null);
