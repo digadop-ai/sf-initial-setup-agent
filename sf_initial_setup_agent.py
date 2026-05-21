@@ -39,7 +39,7 @@ import prereqs
 import web_ui
 
 
-AGENT_VERSION = "0.3.8"
+AGENT_VERSION = "0.4.0"
 
 ENV_FILE = Path.home() / ".5gl-agents-env"
 

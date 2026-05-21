@@ -52,6 +52,15 @@ DEFAULT_CONCURRENCY = 15
 DEFAULT_WAIT_MINUTES = 60
 PROGRESS_INTERVAL_SECONDS = 5
 
+# Profile chunks are special: each chunk MUST bundle the full shape-driver
+# set (CustomObject, ApexClass, Layout, etc.) to retrieve Profile fidelity.
+# A small per-chunk profile count parallelizes the critical path (Profile
+# was 200s of wall time in ecuat run-6 — the single slowest chunk). 10
+# profiles per chunk yields ~4-6 sub-chunks for a typical org, ~40% Profile
+# critical-path reduction. Drivers retrieve incidentally in each sub-chunk
+# (idempotent, harmless).
+PROFILE_PROFILES_PER_CHUNK = 10
+
 XMLNS = "http://soap.sforce.com/2006/04/metadata"
 
 # Folder.Type column → metadata API type name. Note Folder.Type uses 'Email'
@@ -371,18 +380,36 @@ def enumerate_folder_items(
                 "namespacePrefix": row.get("NamespacePrefix") or None,
             }
 
+    # Run the 4 SOQL queries in parallel — each is independent and pulls
+    # several hundred to thousands of rows from SF; sequential adds ~10s.
+    queries = {
+        "Report": "SELECT DeveloperName, OwnerId, NamespacePrefix, SystemModstamp "
+                  "FROM Report WHERE DeveloperName != null",
+        "Dashboard": "SELECT DeveloperName, FolderId, NamespacePrefix, SystemModstamp "
+                     "FROM Dashboard WHERE DeveloperName != null",
+        "EmailTemplate": "SELECT DeveloperName, FolderId, NamespacePrefix, SystemModstamp "
+                         "FROM EmailTemplate WHERE DeveloperName != null",
+        "Document": "SELECT DeveloperName, FolderId, NamespacePrefix, SystemModstamp "
+                    "FROM Document WHERE DeveloperName != null",
+    }
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+        results = {
+            name: pool.submit(sf_query, alias, soql)
+            for name, soql in queries.items()
+        }
+        report_rows = results["Report"].result()
+        dashboard_rows = results["Dashboard"].result()
+        email_rows = results["EmailTemplate"].result()
+        document_rows = results["Document"].result()
+
     # Report: resolve folder via OwnerId, NOT FolderName. Two different
     # Folder records can share the same display Name (e.g., a 'Mystery_Shop'
     # folder under one parent and a 'MysteryShop' folder under another both
     # named "Mystery Shop"). Looking up by FolderName produces nondeterministic
-    # collisions in folder_name_to_dev. OwnerId references the Folder
-    # directly (or a User/Organization for personal reports — those don't
-    # belong in a public manifest and are filtered out).
-    for r in sf_query(
-        alias,
-        "SELECT DeveloperName, OwnerId, NamespacePrefix, SystemModstamp "
-        "FROM Report WHERE DeveloperName != null",
-    ):
+    # collisions. OwnerId references the Folder directly (or a User /
+    # Organization for personal reports — those don't belong in a public
+    # manifest and are filtered out).
+    for r in report_rows:
         if r.get("NamespacePrefix") and not include_managed:
             continue
         folder_dev = folder_id_to_dev.get(r.get("OwnerId"))
@@ -390,14 +417,9 @@ def enumerate_folder_items(
             continue
         _record("Report", folder_dev, r["DeveloperName"], r)
 
-    # Dashboard: use FolderId for the same reason. (Dashboard.FolderId
-    # references Folder; Dashboard.OwnerId references User and is the
-    # personal-dashboard owner, not the folder.)
-    for r in sf_query(
-        alias,
-        "SELECT DeveloperName, FolderId, NamespacePrefix, SystemModstamp "
-        "FROM Dashboard WHERE DeveloperName != null",
-    ):
+    # Dashboard: use FolderId. (Dashboard.OwnerId references User and is
+    # the personal-dashboard owner, not the folder.)
+    for r in dashboard_rows:
         if r.get("NamespacePrefix") and not include_managed:
             continue
         folder_dev = folder_id_to_dev.get(r.get("FolderId"))
@@ -405,12 +427,8 @@ def enumerate_folder_items(
             continue
         _record("Dashboard", folder_dev, r["DeveloperName"], r)
 
-    # EmailTemplate: has FolderId; resolve through folder_id_to_dev.
-    for r in sf_query(
-        alias,
-        "SELECT DeveloperName, FolderId, NamespacePrefix, SystemModstamp "
-        "FROM EmailTemplate WHERE DeveloperName != null",
-    ):
+    # EmailTemplate: FolderId resolves to Folder.
+    for r in email_rows:
         if r.get("NamespacePrefix") and not include_managed:
             continue
         folder_dev = folder_id_to_dev.get(r.get("FolderId"))
@@ -418,12 +436,8 @@ def enumerate_folder_items(
             continue
         _record("EmailTemplate", folder_dev, r["DeveloperName"], r)
 
-    # Document: has FolderId; resolve through folder_id_to_dev.
-    for r in sf_query(
-        alias,
-        "SELECT DeveloperName, FolderId, NamespacePrefix, SystemModstamp "
-        "FROM Document WHERE DeveloperName != null",
-    ):
+    # Document: FolderId resolves to Folder.
+    for r in document_rows:
         if r.get("NamespacePrefix") and not include_managed:
             continue
         folder_dev = folder_id_to_dev.get(r.get("FolderId"))
@@ -463,20 +477,33 @@ def enumerate_org(
     include_managed: bool,
     max_workers: int = DEFAULT_CONCURRENCY,
 ) -> OrgEnumeration:
+    """Enumerate every metadata type the org exposes.
+
+    Phase A (sequential): list_metadata_types — one SF call, fast.
+    Phase B (parallel): every per-type `sf org list metadata <T>` call plus
+    the folder SOQL, package/license queries — all submitted to one wide
+    thread pool so the slowest call sets total wall time. Was previously
+    structured as 5 sequential phases (main-enum → supplemental → folder →
+    packages → licenses) which serialized cleanly-parallelizable work.
+    Phase C (sequential): folder_items SOQL queries — depend on Phase B's
+    folder enumeration completing first.
+    """
     emit("enumerate_started")
     org = OrgEnumeration()
 
+    # ── Phase A ───────────────────────────────────────────────────────────
     types = list_metadata_types(alias)
     emit("metadata_types_listed", count=len(types))
 
-    # Types we handle outside of `sf org list metadata` (folder-based, hardcoded,
-    # or skipped when managed metadata is excluded).
     types_to_enumerate = [
         t for t in types
         if t not in FOLDER_BASED_METADATA_TYPES
         and t != "StandardValueSet"
         and not (t == "InstalledPackage" and not include_managed)
     ]
+    already_seen = set(types) | FOLDER_BASED_METADATA_TYPES | {"StandardValueSet"}
+    supplemental_to_try = [t for t in SUPPLEMENTAL_METADATA_TYPES if t not in already_seen]
+    emit("metadata_types_supplemental_listed", count=len(supplemental_to_try))
 
     def _enum_one(t: str) -> tuple[str, list[str], dict[str, dict]]:
         """Returns (type_name, sorted_member_names, per_member_metadata_dict)."""
@@ -497,53 +524,60 @@ def enumerate_org(
             }
         return t, sorted(set(names)) if names else [], per_member
 
-    total = len(types_to_enumerate)
-    completed = 0
+    # ── Phase B: parallel everything that doesn't depend on folder IDs ───
+    # Sentinel task names (for non-_enum_one tasks) so we can dispatch the
+    # result correctly when each future completes.
+    FOLDERS = "__folders__"
+    PACKAGES = "__packages__"
+    LICENSES = "__licenses__"
+
+    total_b = len(types_to_enumerate) + len(supplemental_to_try) + 3
+    completed_b = 0
+    main_done = 0
+    supp_found = 0
+    supp_total = len(supplemental_to_try)
+    supplemental_set = set(supplemental_to_try)
+    main_set = set(types_to_enumerate)
+
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
-        futures = [pool.submit(_enum_one, t) for t in types_to_enumerate]
+        futures: dict = {}
+        for t in types_to_enumerate:
+            futures[pool.submit(_enum_one, t)] = ("type", t)
+        for t in supplemental_to_try:
+            futures[pool.submit(_enum_one, t)] = ("type", t)
+        futures[pool.submit(enumerate_folders, alias, include_managed)] = ("special", FOLDERS)
+        futures[pool.submit(enumerate_packages, alias)] = ("special", PACKAGES)
+        futures[pool.submit(enumerate_package_licenses, alias)] = ("special", LICENSES)
+
         for fut in concurrent.futures.as_completed(futures):
-            t, names, per_member = fut.result()
-            if names:
-                org.members_by_type[t] = names
-                for full, meta in per_member.items():
-                    org.member_metadata[(t, full)] = meta
-            completed += 1
-            if completed % 10 == 0 or completed == total:
-                emit("enumerate_progress", completed=completed, total=total)
-
-    org.members_by_type["StandardValueSet"] = list(STANDARD_VALUE_SETS)
-
-    # Supplemental pass: try types not surfaced by describeMetadata (feature-gated,
-    # newly-added, etc.). For each supplemental type we run `sf org list metadata`;
-    # types that don't apply to this org return zero members and are skipped. We
-    # ALWAYS emit the start and end events so the user sees this phase in the log
-    # even when it's a no-op (i.e., describeMetadata already covered everything in
-    # our supplemental list).
-    already_seen = set(types) | FOLDER_BASED_METADATA_TYPES | {"StandardValueSet"}
-    supplemental_to_try = [t for t in SUPPLEMENTAL_METADATA_TYPES if t not in already_seen]
-    total_supp = len(supplemental_to_try)
-    emit("metadata_types_supplemental_listed", count=total_supp)
-    found = 0
-    if total_supp:
-        completed = 0
-        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
-            futures = [pool.submit(_enum_one, t) for t in supplemental_to_try]
-            for fut in concurrent.futures.as_completed(futures):
+            kind, tag = futures[fut]
+            if kind == "type":
                 t, names, per_member = fut.result()
                 if names:
                     org.members_by_type[t] = names
                     for full, meta in per_member.items():
                         org.member_metadata[(t, full)] = meta
-                    found += 1
-                completed += 1
-                if completed % 10 == 0 or completed == total_supp:
-                    emit("enumerate_supplemental_progress",
-                         completed=completed, total=total_supp)
-    emit("metadata_types_supplemented",
-         types_tried=total_supp,
-         types_with_members=found)
+                    if t in supplemental_set:
+                        supp_found += 1
+                if t in main_set:
+                    main_done += 1
+            elif tag == FOLDERS:
+                org.folders = fut.result()
+            elif tag == PACKAGES:
+                org.installed_packages = fut.result()
+            elif tag == LICENSES:
+                org.package_licenses = fut.result()
+            completed_b += 1
+            if completed_b % 20 == 0 or completed_b == total_b:
+                emit("enumerate_progress", completed=completed_b, total=total_b)
 
-    org.folders = enumerate_folders(alias, include_managed)
+    emit("metadata_types_supplemented",
+         types_tried=supp_total,
+         types_with_members=supp_found)
+
+    org.members_by_type["StandardValueSet"] = list(STANDARD_VALUE_SETS)
+
+    # ── Phase C: folder items (depends on Phase B's folders being loaded) ─
     folder_items = enumerate_folder_items(
         alias, org.folders, include_managed,
         member_metadata=org.member_metadata,
@@ -554,9 +588,6 @@ def enumerate_org(
     for type_name, members in folder_members_by_type.items():
         if members:
             org.members_by_type[type_name] = sorted(set(members))
-
-    org.installed_packages = enumerate_packages(alias)
-    org.package_licenses = enumerate_package_licenses(alias)
 
     # Experience Cloud sanity check: if Network is present (= EC is enabled in
     # the org) but ExperienceBundle isn't, the modern bundle metadata won't be
@@ -1010,7 +1041,7 @@ def build_chunks(
             members = members_by_type.get(driver, [])
             if members:
                 driver_subset[driver] = list(members)
-        chunks.extend(_pack_profile_chunks(profiles, driver_subset, chunk_size))
+        chunks.extend(_pack_profile_chunks(profiles, driver_subset, PROFILE_PROFILES_PER_CHUNK))
 
     # ExperienceBundle: one retrieve per bundle, no batching. Packing >1
     # bundle in a single retrieve has been observed to silently drop bundles
@@ -1761,7 +1792,7 @@ def parallel_retrieve(
             chunk = futures[fut]
             res = fut.result()
             results.append(res)
-            if not res.success:
+            if not res.success and not _retry_pointless(res, chunk):
                 failed_for_retry.append(chunk)
 
     if failed_for_retry:
@@ -1775,6 +1806,35 @@ def parallel_retrieve(
                 results.extend(fut.result())
 
     return results
+
+
+def _retry_pointless(res: ChunkResult, chunk: Chunk) -> bool:
+    """True iff retry-split is unlikely to recover anything.
+
+    A chunk's `success=False` flag fires when one or more manifest members
+    are silently missing from `result.files`. When most members retrieved
+    fine and only a small number are missing, the missing ones are usually
+    permanent SF rejections (managed-package internals, stub enumerations,
+    name-aliasing quirks, true silent drops). Splitting the chunk in half
+    just exercises SF again for the same outcome — the bad members are
+    bad regardless of which retrieve they're packed in.
+
+    The heuristic: a chunk with ≥5 attempted members where ≤10% are missing
+    AND `files_retrieved > 0` is treated as "isolated bad members".
+    Other failures (timeouts, total chunk failures, high missing ratio)
+    still go through retry-split since splitting might reveal the cause.
+    """
+    if res.members_attempted < 5:
+        return False
+    if res.files_retrieved <= 0:
+        return False
+    missing_count = sum(
+        1 for w in (res.warnings or [])
+        if w.get("category") == "missing_from_result"
+    )
+    if missing_count == 0:
+        return False  # failure wasn't a missing-members one; retry might help
+    return missing_count <= max(1, res.members_attempted // 10)
 
 
 # ── Summary ─────────────────────────────────────────────────────────────────────
