@@ -367,11 +367,11 @@ def call_api_with_retry(client: anthropic.Anthropic, **kwargs) -> Any:
 # ── Key resolution ──────────────────────────────────────────────────────────────
 
 def _resolve_api_key() -> Optional[str]:
-    for name in ("FIVEGL_ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY"):
+    for name in ("DIGADOP_ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY"):
         v = os.environ.get(name)
         if v:
             return v
-    env_file = Path("~/.5gl-agents-env").expanduser()
+    env_file = Path("~/.digadop-agents-env").expanduser()
     if env_file.is_file():
         for raw in env_file.read_text().splitlines():
             line = raw.strip()
@@ -380,7 +380,7 @@ def _resolve_api_key() -> Optional[str]:
             if "=" not in line:
                 continue
             k, _, v = line.partition("=")
-            if k.strip() in ("FIVEGL_ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY"):
+            if k.strip() in ("DIGADOP_ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY"):
                 return v.strip().strip('"').strip("'")
     return None
 
@@ -488,7 +488,7 @@ def run_troubleshooter(
     api_key = _resolve_api_key()
     if not api_key:
         emit("no_api_key",
-             message="No Anthropic API key (env or ~/.5gl-agents-env). Cannot troubleshoot.")
+             message="No Anthropic API key (env or ~/.digadop-agents-env). Cannot troubleshoot.")
         return 3
 
     client = anthropic.Anthropic(api_key=api_key)

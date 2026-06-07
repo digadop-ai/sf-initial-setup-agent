@@ -114,16 +114,16 @@ def detect_python_deps() -> Optional[str]:
 
 
 def detect_anthropic_key() -> Optional[str]:
-    for n in ("FIVEGL_ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY"):
+    for n in ("DIGADOP_ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY"):
         if os.environ.get(n):
             return f"set ({n})"
-    key_file = os.path.expanduser("~/.5gl-agents-env")
+    key_file = os.path.expanduser("~/.digadop-agents-env")
     if os.path.isfile(key_file):
         try:
             with open(key_file) as f:
                 content = f.read()
             if "ANTHROPIC_API_KEY" in content:
-                return "in ~/.5gl-agents-env"
+                return "in ~/.digadop-agents-env"
         except OSError:
             pass
     return None
@@ -191,7 +191,7 @@ PREREQS: list[Prereq] = [
         detect=detect_anthropic_key,
         install_cmd=None,
         optional=True,
-        notes="Agent prompts and persists to ~/.5gl-agents-env on first run if missing.",
+        notes="Agent prompts and persists to ~/.digadop-agents-env on first run if missing.",
     ),
 ]
 

@@ -37,6 +37,6 @@ if [ -f "$SRC" ] && command -v osacompile >/dev/null; then
 fi
 
 # The agent prompts for an Anthropic API key on first run if one isn't found
-# in the environment or ~/.5gl-agents-env, so no key check is needed here.
+# in the environment or ~/.digadop-agents-env, so no key check is needed here.
 
 echo "✅ Ready. Run ./run.sh  (or double-click 'Run sf-initial-setup-agent.command' in Finder)"

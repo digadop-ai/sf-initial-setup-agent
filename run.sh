@@ -13,9 +13,10 @@ if [ ! -d "$VENV" ]; then
     exit 1
 fi
 
-# Source the shared 5GL key file so the API key is available to the orchestrator
-# AND inherited by any subprocesses it spawns (retrieve_metadata.py, troubleshoot.py).
-[ -f "$HOME/.5gl-agents-env" ] && source "$HOME/.5gl-agents-env"
+# Source the shared Digadop AI desktop agents key file so the API key is available
+# to the orchestrator AND inherited by any subprocesses it spawns
+# (retrieve_metadata.py, troubleshoot.py).
+[ -f "$HOME/.digadop-agents-env" ] && source "$HOME/.digadop-agents-env"
 
 # shellcheck disable=SC1091
 source "$VENV/bin/activate"

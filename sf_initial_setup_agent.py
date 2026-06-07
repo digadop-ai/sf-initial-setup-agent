@@ -9,7 +9,7 @@ Thin layer. The real workflow lives elsewhere:
     troubleshoot.py       — Claude wrapper invoked when chunks fail
 
 This file:
-    1. Resolves the Anthropic API key (prompts + persists to ~/.5gl-agents-env if missing).
+    1. Resolves the Anthropic API key (prompts + persists to ~/.digadop-agents-env if missing).
        Skippable — the happy path runs without an API key; only the troubleshooter needs one.
     2. Runs prereq checks (interactive install on missing).
     3. Picks a free port (8765..8774).
@@ -39,14 +39,14 @@ import prereqs
 import web_ui
 
 
-AGENT_VERSION = "0.4.0"
+AGENT_VERSION = "0.5.0"
 
-ENV_FILE = Path.home() / ".5gl-agents-env"
+ENV_FILE = Path.home() / ".digadop-agents-env"
 
 _ENV_LINE = re.compile(r'^\s*(?:export\s+)?(\w+)\s*=\s*(.*?)\s*$')
 
 
-# ── API key (persisted to ~/.5gl-agents-env, shared across all 5GL agents) ──────
+# ── API key (persisted to ~/.digadop-agents-env, shared across Digadop AI desktop agents) ──────
 
 def _read_env_file_var(var_name: str) -> Optional[str]:
     if not ENV_FILE.exists():
@@ -88,10 +88,10 @@ def _write_env_file_var(var_name: str, value: str) -> None:
 
 def resolve_api_key(interactive: bool = True) -> str:
     """Return key from env, key file, or prompt-and-persist. Returns '' if user skips."""
-    key = os.environ.get("FIVEGL_ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_API_KEY")
+    key = os.environ.get("DIGADOP_ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_API_KEY")
     if key:
         return key
-    key = _read_env_file_var("FIVEGL_ANTHROPIC_API_KEY") or _read_env_file_var("ANTHROPIC_API_KEY")
+    key = _read_env_file_var("DIGADOP_ANTHROPIC_API_KEY") or _read_env_file_var("ANTHROPIC_API_KEY")
     if key:
         return key
     if not interactive:
@@ -99,7 +99,7 @@ def resolve_api_key(interactive: bool = True) -> str:
     print()
     print("Anthropic API key not found.")
     print(f"  · Where to get one: https://console.anthropic.com/settings/keys")
-    print(f"  · Where it'll be saved: {ENV_FILE} (shared across all 5GL agents)")
+    print(f"  · Where it'll be saved: {ENV_FILE} (shared across Digadop AI desktop agents)")
     print(f"  · Only the AI troubleshooter needs it — the happy-path retrieve runs without it.")
     print()
     try:
@@ -110,7 +110,7 @@ def resolve_api_key(interactive: bool = True) -> str:
     if not key:
         print("→ Skipped. The agent will warn (but proceed) if any chunk fails without an API key.")
         return ""
-    _write_env_file_var("FIVEGL_ANTHROPIC_API_KEY", key)
+    _write_env_file_var("DIGADOP_ANTHROPIC_API_KEY", key)
     print(f"→ Saved to {ENV_FILE}")
     return key
 

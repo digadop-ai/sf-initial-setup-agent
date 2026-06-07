@@ -142,9 +142,9 @@ state = AppState(config=_load_config())
 # ── Project-setup helpers ───────────────────────────────────────────────────────
 
 def _has_api_key() -> bool:
-    if os.environ.get("FIVEGL_ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_API_KEY"):
+    if os.environ.get("DIGADOP_ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_API_KEY"):
         return True
-    env_file = Path("~/.5gl-agents-env").expanduser()
+    env_file = Path("~/.digadop-agents-env").expanduser()
     if env_file.is_file():
         try:
             return "ANTHROPIC_API_KEY" in env_file.read_text()
@@ -822,7 +822,7 @@ async def _consume_subprocess(sess: RetrieveSession, project_dir: Path) -> None:
         else:
             await sess.push({
                 "event": "troubleshooter_skipped",
-                "reason": "No Anthropic API key (env or ~/.5gl-agents-env). Inspect logs in manifest/logs/ manually.",
+                "reason": "No Anthropic API key (env or ~/.digadop-agents-env). Inspect logs in manifest/logs/ manually.",
             })
 
     await sess.push({

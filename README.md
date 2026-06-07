@@ -2,7 +2,7 @@
 
 Bootstraps a complete Salesforce metadata project for an org. Authenticates against your sandbox/production org, scaffolds an SFDX project, enumerates every metadata member (including managed-package contents), retrieves them in parallel chunks, and writes the result into a directory you can put under source control.
 
-Built and maintained by [5GL.ai](https://5gl.ai), a Salesforce consulting firm.
+Built by [Digadop AI](https://github.com/digadop-ai).
 
 ## Architecture (v0.3.x)
 
@@ -47,13 +47,13 @@ A one-command installer (`5GL-ai/sf-agent-installer`) that bootstraps all of the
 ## Install
 
 ```bash
-git clone https://github.com/5gl-ai/sf-initial-setup-agent.git
+git clone https://github.com/digadop-ai/sf-initial-setup-agent.git
 cd sf-initial-setup-agent
 ./setup.sh
 ./run.sh
 ```
 
-`./run.sh` resolves the API key (prompting once and persisting to `~/.5gl-agents-env` if missing), runs the prereq check (interactively offers to install anything missing), starts the web UI on a free local port, and opens it in your default browser.
+`./run.sh` resolves the API key (prompting once and persisting to `~/.digadop-agents-env` if missing), runs the prereq check (interactively offers to install anything missing), starts the web UI on a free local port, and opens it in your default browser.
 
 ## What you'll see in the browser
 
@@ -84,8 +84,8 @@ CLI flags:
 
 ## Environment variables
 
-- `FIVEGL_ANTHROPIC_API_KEY` — read first; namespaced so it doesn't clash with other tools using `ANTHROPIC_API_KEY`.
-- `ANTHROPIC_API_KEY` — fallback. Both can also live in `~/.5gl-agents-env` (sourced by `run.sh`).
+- `DIGADOP_ANTHROPIC_API_KEY` — read first; namespaced so it doesn't clash with other tools using `ANTHROPIC_API_KEY`.
+- `ANTHROPIC_API_KEY` — fallback. Both can also live in `~/.digadop-agents-env` (sourced by `run.sh`).
 
 ## Safety
 
