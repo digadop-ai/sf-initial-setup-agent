@@ -194,6 +194,13 @@
             case 'warn_experience_cloud':
                 return { level: 'warn', icon: '⚠',
                     html: escapeHtml(event.message || 'Experience Cloud warning') };
+            case 'warn_enumeration_list_failed':
+                // Issue #29: a describeMetadata-reported type failed to list.
+                // The retrieve still attempts it via a wildcard member, but the
+                // operator should treat this as a completeness risk.
+                return { level: 'warn', icon: '⚠',
+                    html: `Could not list ${codeEl(event.type)} members — retrieving via wildcard fallback. ` +
+                          escapeHtml(event.error || '') };
 
             // ── Shutdown scheduling ──
             case 'shutdown_kept_alive':

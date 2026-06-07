@@ -293,15 +293,26 @@ def list_metadata_types(alias: str) -> list[str]:
     return sorted({t["xmlName"] for t in types if t.get("xmlName")})
 
 
-def list_metadata_members(alias: str, type_name: str) -> list[dict]:
-    """Returns list of {fullName, namespacePrefix, ...} across ALL namespaces."""
+def list_metadata_members(alias: str, type_name: str) -> tuple[list[dict], Optional[str]]:
+    """Returns (members, error) — members is a list of {fullName,
+    namespacePrefix, ...} across ALL namespaces; error is the failure message
+    when the list call itself failed, else None.
+
+    Issue #29: the list failure used to be swallowed (`return []`), which made
+    "the list call blew up" indistinguishable from "type has no members". An
+    org-specific listMetadata failure (ReportType is a known offender on orgs
+    with orphaned custom report types) silently dropped the entire type from
+    the retrieve. The caller decides what a failure means: anomalous for
+    describeMetadata-reported types (warn + wildcard fallback), expected for
+    supplemental probes (org lacks the feature — skip silently).
+    """
     try:
         result = sf_json(["org", "list", "metadata", "-m", type_name, "--target-org", alias])
-    except SfError:
-        return []
+    except SfError as e:
+        return [], str(e)
     if isinstance(result, list):
-        return result
-    return result.get("metadataObjects") or result.get("result") or []
+        return result, None
+    return result.get("metadataObjects") or result.get("result") or [], None
 
 
 # ── Org enumeration ─────────────────────────────────────────────────────────────
@@ -319,6 +330,10 @@ class OrgEnumeration:
     # types (Report/Dashboard/EmailTemplate/Document) populate this via
     # SystemModstamp on the SOQL query.
     member_metadata: dict[tuple[str, str], dict] = field(default_factory=dict)
+    # Per-type list failures that were NOT silently swallowed (issue #29).
+    # Each entry: {"type": str, "error": str, "fallback": "wildcard"|"none"}.
+    # Surfaced in retrieve-summary.json and on the dashboard.
+    enumeration_warnings: list[dict] = field(default_factory=list)
 
 
 def enumerate_folders(alias: str, include_managed: bool) -> list[dict]:
@@ -505,9 +520,9 @@ def enumerate_org(
     supplemental_to_try = [t for t in SUPPLEMENTAL_METADATA_TYPES if t not in already_seen]
     emit("metadata_types_supplemental_listed", count=len(supplemental_to_try))
 
-    def _enum_one(t: str) -> tuple[str, list[str], dict[str, dict]]:
-        """Returns (type_name, sorted_member_names, per_member_metadata_dict)."""
-        members = list_metadata_members(alias, t)
+    def _enum_one(t: str) -> tuple[str, list[str], dict[str, dict], Optional[str]]:
+        """Returns (type_name, sorted_member_names, per_member_metadata_dict, list_error)."""
+        members, list_error = list_metadata_members(alias, t)
         names: list[str] = []
         per_member: dict[str, dict] = {}
         for m in members:
@@ -522,7 +537,7 @@ def enumerate_org(
                 "lastModifiedDate": m.get("lastModifiedDate"),
                 "namespacePrefix": ns or None,
             }
-        return t, sorted(set(names)) if names else [], per_member
+        return t, sorted(set(names)) if names else [], per_member, list_error
 
     # ── Phase B: parallel everything that doesn't depend on folder IDs ───
     # Sentinel task names (for non-_enum_one tasks) so we can dispatch the
@@ -552,8 +567,18 @@ def enumerate_org(
         for fut in concurrent.futures.as_completed(futures):
             kind, tag = futures[fut]
             if kind == "type":
-                t, names, per_member = fut.result()
-                if names:
+                t, names, per_member, list_error = fut.result()
+                if list_error and t in main_set:
+                    # Issue #29: describeMetadata said the org HAS this type,
+                    # so a list failure is anomalous. Warn + fall back to a
+                    # wildcard member so the retrieve still attempts the type.
+                    # (Supplemental probe failures fall through silently —
+                    # they just mean the org lacks the feature.)
+                    emit("warn_enumeration_list_failed", type=t, error=list_error)
+                    org.enumeration_warnings.append(
+                        {"type": t, "error": list_error, "fallback": "wildcard"})
+                    org.members_by_type[t] = ["*"]
+                elif names:
                     org.members_by_type[t] = names
                     for full, meta in per_member.items():
                         org.member_metadata[(t, full)] = meta
@@ -1860,7 +1885,11 @@ def _retry_pointless(res: ChunkResult, chunk: Chunk) -> bool:
 
 # ── Summary ─────────────────────────────────────────────────────────────────────
 
-def write_summary(results: list[ChunkResult], summary_path: Path) -> None:
+def write_summary(
+    results: list[ChunkResult],
+    summary_path: Path,
+    enumeration_warnings: Optional[list[dict]] = None,
+) -> None:
     # Aggregate by primary metadata type for the summary page's per-type table.
     by_type: dict[str, dict] = {}
     for r in results:
@@ -1915,6 +1944,10 @@ def write_summary(results: list[ChunkResult], summary_path: Path) -> None:
             "files_retrieved": sum(r.files_retrieved for r in results if r.success),
             "type_count": len(by_type_list),
         },
+        # Per-type enumeration list failures (issue #29). Non-empty means one
+        # or more types could not be enumerated and were retrieved via
+        # wildcard fallback — a completeness risk, not routine noise.
+        "enumeration_warnings": enumeration_warnings or [],
     }
     summary_path.parent.mkdir(parents=True, exist_ok=True)
     with summary_path.open("w") as f:
@@ -2043,7 +2076,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     )
 
     summary_path = manifest_dir / "retrieve-summary.json"
-    write_summary(results, summary_path)
+    write_summary(results, summary_path,
+                  enumeration_warnings=org.enumeration_warnings)
 
     # Per-item log with sf_last_modified + retrieved_at for future delta tools.
     items_path = manifest_dir / "retrieve-items.json"
