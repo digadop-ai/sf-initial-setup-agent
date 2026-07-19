@@ -34,8 +34,10 @@ import argparse
 import concurrent.futures
 import json
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from dataclasses import dataclass, field
@@ -51,6 +53,22 @@ DEFAULT_CHUNK_SIZE = 500
 DEFAULT_CONCURRENCY = 15
 DEFAULT_WAIT_MINUTES = 60
 PROGRESS_INTERVAL_SECONDS = 5
+
+# `sf project retrieve start` enables source tracking by default on scratch and
+# sandbox orgs. Source tracking (@salesforce/source-tracking) records touched
+# files into the project's `.git/index` via isomorphic-git. Running many retrieve
+# workers against ONE shared project dir made them read/mutate/write that single
+# `.git/index` concurrently — a classic last-writer-wins race that corrupts the
+# file (isomorphic-git then throws "Index file is empty" / "Invalid checksum in
+# GitIndex buffer"). See issue #3. The fix: give each retrieve its own throwaway
+# SFDX project so source tracking writes to a private `.git`, then merge the
+# retrieved source into the central project under this lock so no two workers
+# ever write the same destination path at once (the copy is cheap; the sf
+# subprocess is the long pole, so serializing merges costs almost nothing).
+_MERGE_LOCK = threading.Lock()
+# Name of the per-run directory (under the central project) that holds each
+# worker's isolated throwaway project. Cleaned up as we go; safe to delete.
+WORKSPACE_SUBDIR = ".retrieve-workspaces"
 
 # Profile chunks are special: each chunk MUST bundle the full shape-driver
 # set (CustomObject, ApexClass, Layout, etc.) to retrieve Profile fidelity.
@@ -1003,6 +1021,71 @@ def read_api_version(directory: Path) -> str:
     return api
 
 
+def read_package_dir(directory: Path) -> str:
+    """Return the default package directory path from sfdx-project.json.
+
+    Falls back to "force-app" (the scaffolder's default, see web_ui.ensure_scaffolded)
+    if the file is unreadable or declares no package directory.
+    """
+    sfdx_proj = directory / "sfdx-project.json"
+    try:
+        with sfdx_proj.open() as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return "force-app"
+    dirs = data.get("packageDirectories") or []
+    for d in dirs:
+        if isinstance(d, dict) and d.get("default") and d.get("path"):
+            return d["path"]
+    if dirs and isinstance(dirs[0], dict) and dirs[0].get("path"):
+        return dirs[0]["path"]
+    return "force-app"
+
+
+def scaffold_worker_project(base_dir: Path, api_version: str, package_dir: str) -> Path:
+    """Create an isolated, throwaway SFDX project for a single retrieve.
+
+    Each concurrent retrieve runs in its OWN project so `sf`'s default source
+    tracking writes to a private `.git`, never the shared one that issue #3's
+    race corrupted. Returns the new worker project directory. The caller owns
+    cleanup (see `retrieve_one`'s finally block).
+    """
+    base_dir.mkdir(parents=True, exist_ok=True)
+    worker_dir = Path(tempfile.mkdtemp(prefix="w-", dir=base_dir))
+    (worker_dir / package_dir).mkdir(parents=True, exist_ok=True)
+    (worker_dir / "sfdx-project.json").write_text(json.dumps({
+        "packageDirectories": [{"path": package_dir, "default": True}],
+        "namespace": "",
+        "sfdcLoginUrl": "https://login.salesforce.com",
+        "sourceApiVersion": api_version,
+    }, indent=2))
+    return worker_dir
+
+
+def merge_retrieved(src_root: Path, dest_root: Path) -> int:
+    """Copy every file under a worker project's package dir into the central one.
+
+    Chunks address disjoint metadata components, so their retrieved files land at
+    disjoint paths; incidental overlaps (e.g. Profile shape-driver types that ride
+    along in several sub-chunks) carry identical content, so overwriting is safe.
+    Serialized by `_MERGE_LOCK` so two workers never write the same path at once.
+    Returns the number of files copied.
+    """
+    if not src_root.is_dir():
+        return 0
+    copied = 0
+    with _MERGE_LOCK:
+        for src_path in src_root.rglob("*"):
+            if not src_path.is_file():
+                continue
+            rel = src_path.relative_to(src_root)
+            dest_path = dest_root / rel
+            dest_path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src_path, dest_path)
+            copied += 1
+    return copied
+
+
 def write_manifest(path: Path, members_by_type: dict[str, list[str]], api_version: str) -> int:
     """Write a package.xml manifest. Returns total member count."""
     ET.register_namespace("", XMLNS)
@@ -1562,6 +1645,9 @@ def retrieve_one(
     project_dir: Path,
     log_dir: Path,
     wait_minutes: int,
+    api_version: str,
+    package_dir: str,
+    workspace_base: Path,
 ) -> ChunkResult:
     log_path = log_dir / f"{chunk.chunk_id}.log"
     started_at = time.time()
@@ -1581,6 +1667,12 @@ def retrieve_one(
     )
     watcher.start()
 
+    # Each retrieve runs in its OWN throwaway SFDX project so `sf`'s default
+    # source tracking writes to a private `.git`, never the shared index that
+    # concurrent workers corrupted (issue #3). Retrieved source is merged into
+    # the central project below and the worker dir is removed in `finally`.
+    worker_dir = scaffold_worker_project(workspace_base, api_version, package_dir)
+
     try:
         cmd = [
             "sf", "project", "retrieve", "start",
@@ -1594,10 +1686,15 @@ def retrieve_one(
             cmd,
             capture_output=True,
             text=True,
-            cwd=project_dir,
+            cwd=worker_dir,
             timeout=wait_minutes * 60 + 60,
         )
         elapsed = time.time() - started_at
+        # Merge whatever this worker retrieved into the central project. Done
+        # for every outcome (not just clean success) so partial retrieves land
+        # the same source the old shared-dir path would have, and serialized by
+        # `_MERGE_LOCK` so no two workers write the same destination path.
+        merge_retrieved(worker_dir / package_dir, project_dir / package_dir)
         with log_path.open("w") as f:
             f.write(f"# {chunk.chunk_id}  elapsed={elapsed:.1f}s  exit={proc.returncode}\n")
             f.write(f"# cmd: {' '.join(cmd)}\n\n")
@@ -1773,6 +1870,10 @@ def retrieve_one(
         )
     finally:
         stop.set()
+        # Discard the worker's throwaway project (source, its private `.git`,
+        # source-tracking state). Best-effort: a cleanup failure must never mask
+        # the retrieve outcome.
+        shutil.rmtree(worker_dir, ignore_errors=True)
 
 
 def retry_split(
@@ -1783,6 +1884,8 @@ def retry_split(
     manifest_dir: Path,
     api_version: str,
     wait_minutes: int,
+    package_dir: str,
+    workspace_base: Path,
 ) -> list[ChunkResult]:
     """Split a failed chunk in half, retry both halves once each. Returns 2 results."""
     flat: list[tuple[str, str]] = [
@@ -1808,7 +1911,10 @@ def retry_split(
             type_label=f"{failed.type_label} (retry {i}/2)",
             primary_type=failed.primary_type,
         )
-        result = retrieve_one(alias, sub_chunk, project_dir, log_dir, wait_minutes)
+        result = retrieve_one(
+            alias, sub_chunk, project_dir, log_dir, wait_minutes,
+            api_version, package_dir, workspace_base,
+        )
         result.retried = True
         results.append(result)
     return results
@@ -1826,30 +1932,51 @@ def parallel_retrieve(
 ) -> list[ChunkResult]:
     log_dir.mkdir(parents=True, exist_ok=True)
 
+    # Every retrieve runs in an isolated throwaway project under this base so
+    # concurrent workers never share a `.git/index` (issue #3). The central
+    # project's package directory is the merge destination.
+    package_dir = read_package_dir(project_dir)
+    workspace_base = project_dir / WORKSPACE_SUBDIR
+    # A stale base from a crashed prior run would only waste disk; clear it so
+    # this run starts clean.
+    shutil.rmtree(workspace_base, ignore_errors=True)
+    workspace_base.mkdir(parents=True, exist_ok=True)
+
     results: list[ChunkResult] = []
     failed_for_retry: list[Chunk] = []
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=concurrency) as pool:
-        futures = {
-            pool.submit(retrieve_one, alias, c, project_dir, log_dir, wait_minutes): c
-            for c in chunks
-        }
-        for fut in concurrent.futures.as_completed(futures):
-            chunk = futures[fut]
-            res = fut.result()
-            results.append(res)
-            if not res.success and not _retry_pointless(res, chunk):
-                failed_for_retry.append(chunk)
-
-    if failed_for_retry:
-        emit("retry_started", count=len(failed_for_retry))
+    try:
         with concurrent.futures.ThreadPoolExecutor(max_workers=concurrency) as pool:
             futures = {
-                pool.submit(retry_split, alias, c, project_dir, log_dir, manifest_dir, api_version, wait_minutes): c
-                for c in failed_for_retry
+                pool.submit(
+                    retrieve_one, alias, c, project_dir, log_dir, wait_minutes,
+                    api_version, package_dir, workspace_base,
+                ): c
+                for c in chunks
             }
             for fut in concurrent.futures.as_completed(futures):
-                results.extend(fut.result())
+                chunk = futures[fut]
+                res = fut.result()
+                results.append(res)
+                if not res.success and not _retry_pointless(res, chunk):
+                    failed_for_retry.append(chunk)
+
+        if failed_for_retry:
+            emit("retry_started", count=len(failed_for_retry))
+            with concurrent.futures.ThreadPoolExecutor(max_workers=concurrency) as pool:
+                futures = {
+                    pool.submit(
+                        retry_split, alias, c, project_dir, log_dir, manifest_dir,
+                        api_version, wait_minutes, package_dir, workspace_base,
+                    ): c
+                    for c in failed_for_retry
+                }
+                for fut in concurrent.futures.as_completed(futures):
+                    results.extend(fut.result())
+    finally:
+        # Remove the (now-empty) workspace base; individual worker dirs already
+        # cleaned themselves up. Best-effort.
+        shutil.rmtree(workspace_base, ignore_errors=True)
 
     return results
 
