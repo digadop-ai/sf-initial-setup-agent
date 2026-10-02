@@ -38,6 +38,8 @@ from typing import Any, Optional
 
 import anthropic
 
+import terry_ingest
+
 
 MODEL = "claude-sonnet-4-6"
 MAX_TOOLS_ROUNDS = 30
@@ -492,7 +494,19 @@ def run_troubleshooter(
         return 3
 
     client = anthropic.Anthropic(api_key=api_key)
-    emit("troubleshoot_started", failed_count=len(failed), model=MODEL)
+
+    # digadop-ai#12024: report token usage and cost to Terry's ledger under a driven
+    # correlation id (D-5 OURS; this does not change the call above in any way, same
+    # key, same direct Anthropic SDK path). terry_ingest.is_configured() is false on
+    # most desktops today; that is expected and this run proceeds unmetered, per
+    # design section 4.3's "a local run warns and continues" rule.
+    attribution = terry_ingest.Attribution()
+    terry_configured = terry_ingest.is_configured()
+    emit("troubleshoot_started", failed_count=len(failed), model=MODEL,
+         correlation_id=attribution.correlation_id, run_id=attribution.run_id)
+    if not terry_configured:
+        emit("terry_ingest_unconfigured",
+             message="TERRY_INGEST_URL not set; this run's spend will not be metered.")
 
     system_prompt = build_system_prompt(alias, project_dir, mcp_doc_path)
     messages: list[dict] = [{"role": "user", "content": build_user_brief(summary, project_dir)}]
@@ -507,6 +521,7 @@ def run_troubleshooter(
     }
 
     for round_num in range(max_rounds):
+        call_started = time.time()
         try:
             response = call_api_with_retry(
                 client,
@@ -525,6 +540,18 @@ def run_troubleshooter(
              stop_reason=response.stop_reason,
              input_tokens=getattr(response.usage, "input_tokens", None),
              output_tokens=getattr(response.usage, "output_tokens", None))
+
+        if terry_configured:
+            report = terry_ingest.report_llm_call(
+                attribution,
+                model=MODEL,
+                input_tokens=getattr(response.usage, "input_tokens", 0) or 0,
+                output_tokens=getattr(response.usage, "output_tokens", 0) or 0,
+                cache_read_tokens=getattr(response.usage, "cache_read_input_tokens", 0) or 0,
+                cache_write_tokens=getattr(response.usage, "cache_creation_input_tokens", 0) or 0,
+                latency_ms=round((time.time() - call_started) * 1000),
+            )
+            emit("terry_report", round=round_num, **report)
 
         tool_uses = []
         for block in response.content:
