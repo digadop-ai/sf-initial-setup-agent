@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Unit tests for terry_ingest.py (digadop-ai#12024). No network access, no
-Anthropic/Bedrock SDK calls, no paid calls of any kind: every urllib call is
-dependency-injected with a fake opener."""
+"""Unit tests for terry_ingest.py (digadop-ai#12024, R-C4-SFTS-BACKEND, TA ruling
+H3.3). No network access, no Anthropic/Bedrock SDK calls, no paid calls of any kind:
+every urllib call is dependency-injected with a fake opener."""
 
 from __future__ import annotations
 
@@ -20,12 +20,14 @@ import terry_ingest  # noqa: E402
 
 _TERRY_ENV_NAMES = (
     "TERRY_RUN_ID", "TERRY_CORRELATION_ID", "TERRY_PERSONA", "TERRY_PROJECT_REF",
-    "TERRY_TENANT", "TERRY_ENV", "DIGADOP_ENV", "TERRY_INGEST_URL", "TERRY_INGEST_SECRET",
+    "TERRY_TENANT", "DIGADOP_ENV", "TERRY_INGEST_URL", "TERRY_INGEST_SECRET",
+    "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN",
+    "AWS_REGION", "AWS_DEFAULT_REGION",
 )
 
 
 class _ClearTerryEnv(unittest.TestCase):
-    """Base case that guarantees a clean slate: a stray TERRY_* var left set by
+    """Base case that guarantees a clean slate: a stray TERRY_*/AWS_* var left set by
     the real shell (or a previous test) must never leak into another test."""
 
     def setUp(self) -> None:
@@ -43,7 +45,7 @@ class AttributionDefaultsTest(_ClearTerryEnv):
     def test_defaults_with_no_env_set(self):
         attr = terry_ingest.Attribution()
         self.assertEqual(attr.tenant, "0")
-        self.assertEqual(attr.env, "desktop")
+        self.assertIsNone(attr.env)  # never a synthetic "desktop" default (H3.3)
         self.assertIsNone(attr.persona)
         self.assertIsNone(attr.project_ref)
         self.assertTrue(attr.run_id.startswith("sfts-run-"))
@@ -57,7 +59,7 @@ class AttributionDefaultsTest(_ClearTerryEnv):
         os.environ["TERRY_PERSONA"] = "nabu"
         os.environ["TERRY_PROJECT_REF"] = "digadop-ai/digadop-ai#12024"
         os.environ["TERRY_TENANT"] = "7"
-        os.environ["TERRY_ENV"] = "qa"
+        os.environ["DIGADOP_ENV"] = "qa"
         attr = terry_ingest.Attribution()
         self.assertEqual(attr.run_id, "run-123")
         self.assertEqual(attr.correlation_id, "corr-456")
@@ -66,9 +68,12 @@ class AttributionDefaultsTest(_ClearTerryEnv):
         self.assertEqual(attr.tenant, "7")
         self.assertEqual(attr.env, "qa")
 
-    def test_digadop_env_fallback_when_terry_env_unset(self):
-        os.environ["DIGADOP_ENV"] = "prod"
-        self.assertEqual(terry_ingest.Attribution().env, "prod")
+    def test_env_is_read_only_from_digadop_env(self):
+        """R-C4-SFTS-BACKEND H3.3: env comes from DIGADOP_ENV only, matching
+        terry/src/guardrail.ts resolveEnv(). A TERRY_ENV var (the old override) must
+        no longer have any effect."""
+        os.environ["TERRY_ENV"] = "prod"
+        self.assertIsNone(terry_ingest.Attribution().env)
 
 
 class EstimateCostTest(unittest.TestCase):
@@ -90,13 +95,75 @@ class EstimateCostTest(unittest.TestCase):
         self.assertEqual(terry_ingest.estimate_cost_usd("claude-sonnet-4-6", 0, 0), 0.0)
 
 
-class IsConfiguredTest(_ClearTerryEnv):
-    def test_false_when_unset(self):
-        self.assertFalse(terry_ingest.is_configured())
+class ResolveAwsCredentialsTest(_ClearTerryEnv):
+    def test_none_when_unset(self):
+        self.assertIsNone(terry_ingest.resolve_aws_credentials())
 
-    def test_true_when_env_set(self):
-        os.environ["TERRY_INGEST_URL"] = "https://example.invalid/ingest"
-        self.assertTrue(terry_ingest.is_configured())
+    def test_none_when_only_access_key_set(self):
+        os.environ["AWS_ACCESS_KEY_ID"] = "AKIA..."
+        self.assertIsNone(terry_ingest.resolve_aws_credentials())
+
+    def test_resolves_from_env_without_session_token(self):
+        os.environ["AWS_ACCESS_KEY_ID"] = "AKIA..."
+        os.environ["AWS_SECRET_ACCESS_KEY"] = "secret"
+        creds = terry_ingest.resolve_aws_credentials()
+        self.assertEqual(creds["access_key_id"], "AKIA...")
+        self.assertEqual(creds["secret_access_key"], "secret")
+        self.assertNotIn("session_token", creds)
+
+    def test_resolves_session_token_when_present(self):
+        os.environ["AWS_ACCESS_KEY_ID"] = "AKIA..."
+        os.environ["AWS_SECRET_ACCESS_KEY"] = "secret"
+        os.environ["AWS_SESSION_TOKEN"] = "tok"
+        creds = terry_ingest.resolve_aws_credentials()
+        self.assertEqual(creds["session_token"], "tok")
+
+
+class CheckIngestReadinessTest(_ClearTerryEnv):
+    """R-C4-SFTS-BACKEND H3.3: the three skip cases named in the dispatch, in order."""
+
+    def _configure_everything_except(self, missing: str) -> None:
+        if missing != "url":
+            os.environ["TERRY_INGEST_URL"] = "https://example.invalid/ingest"
+        if missing != "secret":
+            os.environ["TERRY_INGEST_SECRET"] = "topsecret"
+        if missing != "env":
+            os.environ["DIGADOP_ENV"] = "qa"
+        if missing != "creds":
+            os.environ["AWS_ACCESS_KEY_ID"] = "AKIA..."
+            os.environ["AWS_SECRET_ACCESS_KEY"] = "secret"
+
+    def test_absent_when_no_url(self):
+        self._configure_everything_except("url")
+        result = terry_ingest.check_ingest_readiness(terry_ingest.Attribution())
+        self.assertFalse(result["ready"])
+        self.assertTrue(result["reason"].startswith("absent"))
+
+    def test_incomplete_when_no_secret(self):
+        self._configure_everything_except("secret")
+        result = terry_ingest.check_ingest_readiness(terry_ingest.Attribution())
+        self.assertFalse(result["ready"])
+        self.assertTrue(result["reason"].startswith("incomplete"))
+        self.assertIn("TERRY_INGEST_SECRET", result["reason"])
+
+    def test_incomplete_when_no_digadop_env(self):
+        self._configure_everything_except("env")
+        result = terry_ingest.check_ingest_readiness(terry_ingest.Attribution())
+        self.assertFalse(result["ready"])
+        self.assertTrue(result["reason"].startswith("incomplete"))
+        self.assertIn("DIGADOP_ENV", result["reason"])
+
+    def test_cannot_be_signed_when_no_aws_credentials(self):
+        self._configure_everything_except("creds")
+        result = terry_ingest.check_ingest_readiness(terry_ingest.Attribution())
+        self.assertFalse(result["ready"])
+        self.assertTrue(result["reason"].startswith("cannot be signed"))
+
+    def test_ready_when_everything_is_configured(self):
+        self._configure_everything_except("")
+        result = terry_ingest.check_ingest_readiness(terry_ingest.Attribution())
+        self.assertTrue(result["ready"])
+        self.assertIsNone(result["reason"])
 
 
 class EnvFileFallbackTest(_ClearTerryEnv):
@@ -120,7 +187,6 @@ class EnvFileFallbackTest(_ClearTerryEnv):
                 self.assertEqual(
                     terry_ingest._resolve_env_value(("TERRY_INGEST_SECRET",)), "shh"
                 )
-                self.assertTrue(terry_ingest.is_configured())
 
     def test_env_var_wins_over_env_file(self):
         with tempfile.TemporaryDirectory() as td:
@@ -162,11 +228,13 @@ class ReportLlmCallTest(_ClearTerryEnv):
         self.assertFalse(result["reported"])
         self.assertIn("TERRY_INGEST_URL", result["reason"])
 
-    def test_success_path_posts_expected_body_and_header(self):
+    def test_success_path_posts_terry_llm_call_shape_with_secret_header(self):
         os.environ["TERRY_INGEST_URL"] = "https://example.invalid/ingest"
         os.environ["TERRY_INGEST_SECRET"] = "topsecret"
         os.environ["TERRY_TENANT"] = "0"
         os.environ["TERRY_PERSONA"] = "nabu"
+        os.environ["TERRY_PROJECT_REF"] = "digadop-ai/digadop-ai#12024"
+        os.environ["DIGADOP_ENV"] = "qa"
 
         captured = {}
 
@@ -176,6 +244,7 @@ class ReportLlmCallTest(_ClearTerryEnv):
             captured["header"] = req.get_header("X-terry-ingest-secret") or req.get_header(
                 "X-Terry-Ingest-Secret"
             )
+            captured["authorization"] = req.get_header("Authorization")
             import json as _json
 
             captured["body"] = _json.loads(req.data.decode("utf-8"))
@@ -185,30 +254,40 @@ class ReportLlmCallTest(_ClearTerryEnv):
         attr = terry_ingest.Attribution()
         result = terry_ingest.report_llm_call(
             attr, model="claude-sonnet-4-6", input_tokens=100, output_tokens=50,
-            latency_ms=1234, _urlopen=_fake_opener,
+            latency_ms=1234, stop_reason="end_turn", _urlopen=_fake_opener,
         )
 
         self.assertTrue(result["reported"])
         self.assertEqual(result["status"], 204)
+        self.assertEqual(result["correlation_id"], attr.correlation_id)
         self.assertEqual(captured["method"], "POST")
         self.assertEqual(captured["header"], "topsecret")
+        # No AWS creds configured in this test: never SigV4-signed.
+        self.assertIsNone(captured["authorization"])
+
         body = captured["body"]
-        self.assertEqual(body["kind"], "metered_event")
+        self.assertNotIn("kind", body)  # the real terry_llm_call shape, not metered_event
         self.assertEqual(body["product"], "sf-initial-setup-agent")
         self.assertEqual(body["component"], "troubleshoot")
-        self.assertEqual(body["env"], "desktop")
-        self.assertEqual(body["metric"], "llm_call")
-        self.assertEqual(body["quantity"], 150)
+        self.assertEqual(body["env"], "qa")
+        self.assertEqual(body["backend"], "anthropic")
+        self.assertEqual(body["payer"], "us")
+        self.assertEqual(body["model"], "claude-sonnet-4-6")
+        self.assertEqual(body["inputTokens"], 100)
+        self.assertEqual(body["outputTokens"], 50)
+        self.assertEqual(body["cacheReadInputTokens"], 0)
+        self.assertEqual(body["cacheWriteInputTokens"], 0)
         self.assertEqual(body["tenant"], "0")
         self.assertEqual(body["runId"], attr.run_id)
         self.assertEqual(body["correlationId"], attr.correlation_id)
         self.assertEqual(body["latencyMs"], 1234)
-        self.assertAlmostEqual(body["costUsd"], (100 * 3.0 + 50 * 15.0) / 1_000_000)
-        self.assertEqual(body["metadata"]["model"], "claude-sonnet-4-6")
-        self.assertEqual(body["metadata"]["backend"], "anthropic-direct")
-        self.assertEqual(body["metadata"]["persona"], "nabu")
-        self.assertEqual(body["metadata"]["inputTokens"], 100)
-        self.assertEqual(body["metadata"]["outputTokens"], 50)
+        self.assertEqual(body["stopReason"], "end_turn")
+        self.assertEqual(body["persona"], "nabu")
+        self.assertEqual(body["projectRef"], "digadop-ai/digadop-ai#12024")
+        expected_cost = (100 * 3.0 + 50 * 15.0) / 1_000_000
+        self.assertAlmostEqual(body["costUsd"], expected_cost)
+        self.assertAlmostEqual(body["estimatedCostUsd"], expected_cost)
+        self.assertAlmostEqual(body["actualCostUsd"], expected_cost)
 
     def test_no_secret_header_when_secret_unset(self):
         os.environ["TERRY_INGEST_URL"] = "https://example.invalid/ingest"
@@ -226,7 +305,7 @@ class ReportLlmCallTest(_ClearTerryEnv):
         )
         self.assertIsNone(captured["header"])
 
-    def test_unpriced_model_omits_cost_usd_field_entirely(self):
+    def test_unpriced_model_sends_null_estimate_and_actual_but_real_zero_cost_usd(self):
         os.environ["TERRY_INGEST_URL"] = "https://example.invalid/ingest"
         captured = {}
 
@@ -240,7 +319,56 @@ class ReportLlmCallTest(_ClearTerryEnv):
             terry_ingest.Attribution(), model="some-future-model",
             input_tokens=1, output_tokens=1, _urlopen=_fake_opener,
         )
-        self.assertNotIn("costUsd", captured["body"])
+        body = captured["body"]
+        self.assertIsNone(body["estimatedCostUsd"])
+        self.assertIsNone(body["actualCostUsd"])
+        self.assertEqual(body["costUsd"], 0.0)  # deprecated alias: 0 when unknown, never omitted
+
+    def test_authentication_signs_with_sigv4_when_aws_credentials_resolve(self):
+        os.environ["TERRY_INGEST_URL"] = "https://example.invalid/ingest"
+        os.environ["AWS_ACCESS_KEY_ID"] = "AKIAEXAMPLE"
+        os.environ["AWS_SECRET_ACCESS_KEY"] = "secretkeyexample"
+        os.environ["AWS_REGION"] = "us-east-1"
+        captured = {}
+
+        def _fake_opener(req, timeout):
+            captured["authorization"] = req.get_header("Authorization")
+            captured["amz_date"] = req.get_header("X-amz-date")
+            captured["content_sha256"] = req.get_header("X-amz-content-sha256")
+            captured["host"] = req.get_header("Host")
+            return _FakeResponse(204)
+
+        terry_ingest.report_llm_call(
+            terry_ingest.Attribution(), model="claude-sonnet-4-6",
+            input_tokens=1, output_tokens=1, _urlopen=_fake_opener,
+        )
+        self.assertIsNotNone(captured["authorization"])
+        self.assertTrue(captured["authorization"].startswith("AWS4-HMAC-SHA256 Credential=AKIAEXAMPLE/"))
+        self.assertIn("SignedHeaders=", captured["authorization"])
+        self.assertIn("Signature=", captured["authorization"])
+        self.assertIsNotNone(captured["amz_date"])
+        self.assertIsNotNone(captured["content_sha256"])
+        self.assertEqual(captured["host"], "example.invalid")
+
+    def test_authentication_signature_covers_the_session_token_when_present(self):
+        os.environ["TERRY_INGEST_URL"] = "https://example.invalid/ingest"
+        os.environ["AWS_ACCESS_KEY_ID"] = "AKIAEXAMPLE"
+        os.environ["AWS_SECRET_ACCESS_KEY"] = "secretkeyexample"
+        os.environ["AWS_SESSION_TOKEN"] = "sessiontoken123"
+        captured = {}
+
+        def _fake_opener(req, timeout):
+            captured["security_token"] = req.get_header("X-amz-security-token")
+            captured["authorization"] = req.get_header("Authorization")
+            return _FakeResponse(204)
+
+        terry_ingest.report_llm_call(
+            terry_ingest.Attribution(), model="claude-sonnet-4-6",
+            input_tokens=1, output_tokens=1, _urlopen=_fake_opener,
+        )
+        self.assertEqual(captured["security_token"], "sessiontoken123")
+        # The session token header must itself be part of what got signed.
+        self.assertIn("x-amz-security-token", captured["authorization"].lower())
 
     def test_http_error_never_raises(self):
         os.environ["TERRY_INGEST_URL"] = "https://example.invalid/ingest"
@@ -254,6 +382,7 @@ class ReportLlmCallTest(_ClearTerryEnv):
         )
         self.assertFalse(result["reported"])
         self.assertEqual(result["status"], 401)
+        self.assertIn("correlation_id", result)
 
     def test_network_error_never_raises(self):
         os.environ["TERRY_INGEST_URL"] = "https://example.invalid/ingest"

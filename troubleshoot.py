@@ -493,20 +493,25 @@ def run_troubleshooter(
              message="No Anthropic API key (env or ~/.digadop-agents-env). Cannot troubleshoot.")
         return 3
 
-    client = anthropic.Anthropic(api_key=api_key)
-
-    # digadop-ai#12024: report token usage and cost to Terry's ledger under a driven
-    # correlation id (D-5 OURS; this does not change the call above in any way, same
-    # key, same direct Anthropic SDK path). terry_ingest.is_configured() is false on
-    # most desktops today; that is expected and this run proceeds unmetered, per
-    # design section 4.3's "a local run warns and continues" rule.
+    # digadop-ai#12024 (R-C4-SFTS-BACKEND, TA ruling H3.3): every call below spends OUR
+    # key (D-5 OURS), so it must never run in a way that cannot be attributed on
+    # Terry's ledger. Checked ONCE, before the Anthropic client is even constructed:
+    # an absent, incomplete, or unsignable ingest configuration skips the paid step
+    # entirely, with zero paid calls, rather than the old "proceeds unmetered" shape.
     attribution = terry_ingest.Attribution()
-    terry_configured = terry_ingest.is_configured()
+    readiness = terry_ingest.check_ingest_readiness(attribution)
+    emit("terry_ingest_readiness", ready=readiness["ready"], reason=readiness["reason"],
+         correlation_id=attribution.correlation_id, run_id=attribution.run_id)
+    if not readiness["ready"]:
+        emit("terry_ingest_not_ready",
+             message=f"Terry ingest not ready ({readiness['reason']}); skipping the paid "
+                     "LLM step. Zero paid calls made.",
+             reason=readiness["reason"])
+        return 6
+
+    client = anthropic.Anthropic(api_key=api_key)
     emit("troubleshoot_started", failed_count=len(failed), model=MODEL,
          correlation_id=attribution.correlation_id, run_id=attribution.run_id)
-    if not terry_configured:
-        emit("terry_ingest_unconfigured",
-             message="TERRY_INGEST_URL not set; this run's spend will not be metered.")
 
     system_prompt = build_system_prompt(alias, project_dir, mcp_doc_path)
     messages: list[dict] = [{"role": "user", "content": build_user_brief(summary, project_dir)}]
@@ -541,17 +546,29 @@ def run_troubleshooter(
              input_tokens=getattr(response.usage, "input_tokens", None),
              output_tokens=getattr(response.usage, "output_tokens", None))
 
-        if terry_configured:
-            report = terry_ingest.report_llm_call(
-                attribution,
-                model=MODEL,
-                input_tokens=getattr(response.usage, "input_tokens", 0) or 0,
-                output_tokens=getattr(response.usage, "output_tokens", 0) or 0,
-                cache_read_tokens=getattr(response.usage, "cache_read_input_tokens", 0) or 0,
-                cache_write_tokens=getattr(response.usage, "cache_creation_input_tokens", 0) or 0,
-                latency_ms=round((time.time() - call_started) * 1000),
+        report = terry_ingest.report_llm_call(
+            attribution,
+            model=MODEL,
+            input_tokens=getattr(response.usage, "input_tokens", 0) or 0,
+            output_tokens=getattr(response.usage, "output_tokens", 0) or 0,
+            cache_read_tokens=getattr(response.usage, "cache_read_input_tokens", 0) or 0,
+            cache_write_tokens=getattr(response.usage, "cache_creation_input_tokens", 0) or 0,
+            latency_ms=round((time.time() - call_started) * 1000),
+            stop_reason=response.stop_reason,
+        )
+        emit("terry_report", round=round_num, **report)
+        if not report.get("reported"):
+            # R-C4-SFTS-BACKEND: the call already happened and already spent real
+            # money, so a dead ingest here must never abort the troubleshooting loop
+            # (report_llm_call never raises); it must also never be silently lost.
+            # One plain (non-JSON) stderr line, distinct from the emit() progress
+            # stream, so a human tailing stderr sees it even without a JSON parser.
+            print(
+                f"TERRY INGEST POST FAILED after a real LLM call "
+                f"(correlation_id={attribution.correlation_id}): "
+                f"{report.get('error') or report.get('status') or report.get('reason')}",
+                file=sys.stderr,
             )
-            emit("terry_report", round=round_num, **report)
 
         tool_uses = []
         for block in response.content:
